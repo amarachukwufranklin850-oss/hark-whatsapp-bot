@@ -532,6 +532,157 @@ def telegram_pdf_reply(chat, text):
                       json={"chat_id": chat, "text": "Sorry, I couldn't make that PDF. Please try again."}, timeout=20)
 
 
+# ---------- picture & video creation (free: Pollinations images + ffmpeg) ----------
+IMG_ASK = re.compile(r"^\s*(please\s+)?(draw|paint|sketch|generate|create|make|design|show me)\b.{0,40}\b(image|picture|pic|photo|drawing|art|artwork|logo|poster|wallpaper|illustration)s?\b", re.I | re.S)
+VID_ASK = re.compile(r"^\s*(please\s+)?(generate|create|make|animate)\b.{0,40}\b(video|clip|animation)\b", re.I | re.S)
+MEDIA_BLOCK = re.compile(r"\b(nude|naked|nsfw|porn|sex|sexy|boobs|explicit|gore|beheading|child|kid|minor|underage|schoolgirl)\b", re.I)
+MEDIA_LIMITS = {"img": 15, "vid": 4}
+_media_use = {}
+
+
+def media_quota(chat, kind):
+    day = time.strftime("%Y-%m-%d")
+    k = (chat, kind, day)
+    if _media_use.get(k, 0) >= MEDIA_LIMITS[kind]:
+        return False
+    _media_use[k] = _media_use.get(k, 0) + 1
+    return True
+
+
+def media_prompt(text, cmd):
+    p = text[len(cmd):].strip() if text.lower().startswith(cmd) else text.strip()
+    p = re.sub(r"^\s*(please\s+)?(draw|paint|sketch|generate|create|make|design|show me|animate)\s+(me\s+)?(an?\s+)?"
+               r"(image|picture|pic|photo|drawing|art|artwork|video|clip|animation)?\s*(of|showing|about|for)?\s*", "", p, flags=re.I)
+    return p.strip(" .")[:400]
+
+
+_img_lock = threading.Lock()
+_img_last = [0.0]
+IMG_GAP = 46   # free tier: 1 image per 45 s per server IP (POLLINATIONS_KEY lifts it)
+
+
+def ai_image(prompt, seed=None, size=768):
+    """Free Pollinations image. Without a key the server gets 1 image / 45 s, so requests queue."""
+    from urllib.parse import quote
+    seed = seed if seed is not None else int(time.time()) % 100000
+    key = os.environ.get("POLLINATIONS_KEY", "")
+    url = (f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={size}&height={size}"
+           f"&seed={seed}&nologo=true&safe=true")
+    hdr = {"Authorization": f"Bearer {key}"} if key else {}
+    with _img_lock:
+        for _ in range(3):
+            if not key:
+                wait = IMG_GAP - (time.time() - _img_last[0])
+                if wait > 0:
+                    time.sleep(wait)
+            try:
+                r = requests.get(url, headers=hdr, timeout=90)
+                _img_last[0] = time.time()
+                if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
+                    return r.content
+                print("image gen status:", r.status_code, r.text[:200])
+                m = re.search(r"Retry after (\d+)s", r.text)
+                time.sleep(int(m.group(1)) + 1 if m else 5)
+            except Exception as e:
+                print("image gen error:", e)
+    return None
+
+
+def tg_text(chat, t):
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json={"chat_id": chat, "text": t}, timeout=20)
+
+
+def remember(chat, user_text, note):
+    try:
+        h = history.setdefault(f"tg:{chat}", [])
+        h += [{"role": "user", "content": user_text}, {"role": "assistant", "content": note}]
+        del h[:-20]
+        history.save(f"tg:{chat}")
+    except Exception as e:
+        print("history error:", e)
+
+
+def telegram_image_reply(chat, text):
+    prompt = media_prompt(text, "/image")
+    if not prompt:
+        return tg_text(chat, "Tell me what to draw, e.g. /image a lion wearing agbada in Lagos at sunset")
+    if MEDIA_BLOCK.search(prompt):
+        return tg_text(chat, "Sorry, I can't make that kind of picture. Try something else.")
+    if not media_quota(chat, "img"):
+        return tg_text(chat, f"You've hit today's limit of {MEDIA_LIMITS['img']} pictures. Try again tomorrow.")
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction", json={"chat_id": chat, "action": "upload_photo"}, timeout=5)
+    img = ai_image(prompt)
+    if not img:
+        return tg_text(chat, "Sorry, the picture maker is busy right now. Please try again in a minute.")
+    r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+                      data={"chat_id": chat, "caption": f"\U0001F3A8 {prompt}"[:1000]},
+                      files={"photo": ("tygars.jpg", img, "image/jpeg")}, timeout=60)
+    if r.status_code >= 300:
+        print("sendPhoto error:", r.status_code, r.text)
+        return tg_text(chat, "Sorry, I couldn't send the picture.")
+    remember(chat, text, f"[sent an AI picture: {prompt}]")
+
+
+def make_clip(frames, secs=3):
+    """Turn still frames into a short MP4 with slow zoom and crossfades."""
+    import subprocess, tempfile, imageio_ffmpeg
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    d = tempfile.mkdtemp()
+    ins, parts = [], []
+    fps, n = 24, len(frames)
+    for i, f in enumerate(frames):
+        p = os.path.join(d, f"f{i}.jpg")
+        open(p, "wb").write(f)
+        ins += ["-i", p]
+        z = "zoom+0.0012" if i % 2 == 0 else "if(eq(on,0),1.15,zoom-0.0012)"
+        parts.append(f"[{i}:v]scale=1024:1024,zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                     f"d={secs*fps}:s=640x640:fps={fps},setsar=1,format=yuv420p[v{i}]")
+    chain, last, off = "", "v0", secs - 0.6
+    for i in range(1, n):
+        chain += f";[{last}][v{i}]xfade=transition=fade:duration=0.6:offset={off:.2f}[x{i}]"
+        last, off = f"x{i}", off + secs - 0.6
+    out = os.path.join(d, "out.mp4")
+    cmd = [ff, "-y", *ins, "-filter_complex", ";".join(parts) + chain, "-map", f"[{last}]",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "26", "-movflags", "+faststart", out]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=240)
+    data = open(out, "rb").read()
+    subprocess.run(["rm", "-rf", d])
+    return data
+
+
+def telegram_video_reply(chat, text):
+    prompt = media_prompt(text, "/video")
+    if not prompt:
+        return tg_text(chat, "Tell me what the video should show, e.g. /video a rocket launching from Lagos at night")
+    if MEDIA_BLOCK.search(prompt):
+        return tg_text(chat, "Sorry, I can't make that kind of video. Try something else.")
+    if not media_quota(chat, "vid"):
+        return tg_text(chat, f"You've hit today's limit of {MEDIA_LIMITS['vid']} videos. Try again tomorrow.")
+    tg_text(chat, "\U0001F3AC Making your video, this takes 2 to 3 minutes...")
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction", json={"chat_id": chat, "action": "upload_video"}, timeout=5)
+    seed = int(time.time()) % 100000
+    shots = ["wide establishing shot", "dramatic close-up", "cinematic final shot"]
+    frames = []
+    for i, s in enumerate(shots):
+        f = ai_image(f"{prompt}, {s}, cinematic, consistent style", seed=seed + i, size=1024)
+        if f:
+            frames.append(f)
+    if len(frames) < 2:
+        return tg_text(chat, "Sorry, the video maker is busy right now. Please try again in a minute.")
+    try:
+        vid = make_clip(frames, secs=3)
+    except Exception as e:
+        print("video error:", e)
+        return tg_text(chat, "Sorry, I couldn't put the video together. Please try again.")
+    r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo",
+                      data={"chat_id": chat, "caption": f"\U0001F3AC {prompt}"[:1000], "supports_streaming": "true"},
+                      files={"video": ("tygars.mp4", vid, "video/mp4")}, timeout=120)
+    if r.status_code >= 300:
+        print("sendVideo error:", r.status_code, r.text)
+        return tg_text(chat, "Sorry, I couldn't send the video.")
+    remember(chat, text, f"[sent an AI video clip: {prompt}]")
+
+
 TTS_VOICE = "en-NG-AbeoNeural"   # Nigerian English voice (Microsoft Edge TTS, free)
 VOICE_ASK = re.compile(r"\b(voice note|voice reply|in (a )?voice|audio|read (it|this|that) (out|aloud)|say it|speak it|talk to me)\b", re.I)
 
@@ -566,6 +717,11 @@ def send_voice(chat, text, caption=""):
 
 
 def telegram_reply(chat, text, reply_to_text=""):
+    low = text.strip().lower()
+    if low.startswith("/image") or (IMG_ASK.search(text) and not text.startswith("/")):
+        return telegram_image_reply(chat, text)
+    if low.startswith("/video") or (VID_ASK.search(text) and not text.startswith("/")):
+        return telegram_video_reply(chat, text)
     if PDF_ASK.search(text) and not text.startswith("/"):
         return telegram_pdf_reply(chat, text)
     if text.startswith("/speak"):
@@ -587,7 +743,7 @@ def telegram_reply(chat, text, reply_to_text=""):
     if text.strip() == "/browse":
         reply = ""
     elif text.strip() == "/start":
-        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), ask me to make a PDF, or use /speak to hear text read aloud: school work, tech, "
+        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), ask me to make a PDF, /image to create a picture, /video for a short clip, or /speak to hear text read aloud: school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
         try:

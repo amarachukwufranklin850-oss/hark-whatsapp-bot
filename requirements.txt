@@ -4,3 +4,4 @@ gunicorn
 fpdf2
 edge-tts
 psycopg2-binary
+imageio-ffmpeg
