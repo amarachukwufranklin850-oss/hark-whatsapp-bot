@@ -411,11 +411,85 @@ def telegram_photo_reply(chat, file_id, caption):
                   json={"chat_id": chat, "text": reply[:4000]}, timeout=20)
 
 
+PDF_ASK = re.compile(r"\b(make|create|generate|write|turn|convert|give|send|prepare)\b.*\bpdf\b|\bpdf\b.*\b(of|on|about|for)\b", re.I | re.S)
+
+
+def latin(t):
+    """Core PDF fonts are Latin-1 only; swap common Unicode punctuation."""
+    for a, b in {"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-",
+                 "\u2014": "-", "\u2011": "-", "\u2022": "-", "\u2026": "...", "\u00a0": " ",
+                 "\u20a6": "N", "\u2192": "->", "\u00d7": "x"}.items():
+        t = t.replace(a, b)
+    import unicodedata
+    t = unicodedata.normalize("NFKC", t).replace("\u2212", "-").replace("\u2011", "-")
+    return t.encode("latin-1", "replace").decode("latin-1").replace("?\u00b0", "\u00b0")
+
+
+def make_pdf(title, body):
+    from fpdf import FPDF
+    pdf = FPDF()
+    pdf.set_auto_page_break(True, margin=18)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.multi_cell(0, 9, latin(title), align="L", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    for line in body.splitlines():
+        line = line.rstrip()
+        if not line:
+            pdf.ln(3)
+            continue
+        if line.startswith("#"):
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.multi_cell(0, 7, latin(line.lstrip("# ").strip()), align="L", new_x="LMARGIN", new_y="NEXT")
+        else:
+            pdf.set_font("Helvetica", "", 11)
+            if line.lstrip().startswith(("- ", "* ")):
+                line = "  - " + line.lstrip()[2:]
+            pdf.multi_cell(0, 6, latin(line.replace("**", "")), align="L", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_y(-14)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.cell(0, 6, "Made with Tygars Bot", align="C")
+    return bytes(pdf.output())
+
+
+def telegram_pdf_reply(chat, text):
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
+                      json={"chat_id": chat, "action": "upload_document"}, timeout=5)
+        msgs = [{"role": "system", "content": SYSTEM + " You are writing the content of a PDF document. "
+                 "First line: a short title only. Then the document in plain text: use lines starting with "
+                 "'# ' for section headings and '- ' for bullet points. No tables, no emojis. Be thorough "
+                 "but clear (about 300-900 words unless asked otherwise)."},
+                {"role": "user", "content": text}]
+        out = (groq(msgs, tools=False).get("content") or "").strip()
+        out = re.sub(r"<think>.*?</think>", "", out, flags=re.S).strip()
+        title, _, body = out.partition("\n")
+        title = title.strip("# *").strip() or "Tygars Document"
+        data = make_pdf(title, body.strip())
+        fname = re.sub(r"[^A-Za-z0-9]+", "_", title)[:40].strip("_") + ".pdf"
+        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendDocument",
+                          data={"chat_id": chat, "caption": f"Here's your PDF: {title}"[:1000]},
+                          files={"document": (fname, data, "application/pdf")}, timeout=60)
+        if r.status_code >= 300:
+            print("sendDocument error:", r.status_code, r.text)
+            raise RuntimeError("send failed")
+        h = history.setdefault(f"tg:{chat}", [])
+        h += [{"role": "user", "content": text}, {"role": "assistant", "content": f"[sent a PDF: {title}]"}]
+        del h[:-10]
+    except Exception as e:
+        print("pdf error:", e)
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                      json={"chat_id": chat, "text": "Sorry, I couldn't make that PDF. Please try again."}, timeout=20)
+
+
 def telegram_reply(chat, text):
+    if PDF_ASK.search(text) and not text.startswith("/"):
+        return telegram_pdf_reply(chat, text)
     if text.strip() == "/browse":
         reply = ""
     elif text.strip() == "/start":
-        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note): school work, tech, "
+        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), or ask me to make a PDF: school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
         try:
