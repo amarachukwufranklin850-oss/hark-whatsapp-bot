@@ -37,9 +37,12 @@ SCHEMA_PG += [
     "create table if not exists hg_codes (email text primary key, codehash text, exp double precision, tries int default 0)",
     "create table if not exists hg_notifs (id bigserial primary key, uid text, kind text, from_uid text, from_nick text, pid bigint, ts double precision, seen int default 0)",
     "create table if not exists hg_media (k text primary key, data text)",
+    "create table if not exists hg_devices (dev text primary key, uid text, ts double precision)",
+    "create table if not exists hg_signups (iph text, ts double precision)",
 ]
 ALTERS = ["alter table hg_users add column email text", "alter table hg_users add column photo_v int default 0",
-          "alter table hg_posts add column img int default 0", "alter table hg_users add column bio text default ''"]
+          "alter table hg_posts add column img int default 0", "alter table hg_users add column bio text default ''",
+          "alter table hg_users add column pwhash text"]
 SCHEMA_LITE = [s.replace("bigserial primary key", "integer primary key autoincrement")
                .replace("double precision", "real").replace("bigint", "integer") for s in SCHEMA_PG]
 
@@ -175,6 +178,12 @@ def send_code():
     hits = [t for t in _code_ip.get(ip, []) if now - t < 3600]
     if len(hits) >= 8:
         return {"error": "Too many codes requested. Try again later."}, 429
+    purpose = d.get("purpose") or "login"
+    exists = bool(q("select 1 from hg_users where email=?", (email,), one=True))
+    if purpose == "register" and exists:
+        return {"error": "That email already has an account. Log in or reset your password."}, 400
+    if purpose == "reset" and not exists:
+        return {"ok": True}  # don't reveal which emails are registered
     old = q("select exp from hg_codes where email=?", (email,), one=True)
     if old and old[0] - 600 + 45 > now:
         return {"error": "Wait a minute before asking for a new code."}, 429
@@ -199,6 +208,124 @@ def mode():
     return {"email": _email_ready()}
 
 
+IP_SALT = os.environ.get("HG_IP_SALT", "campus-connect")
+MAX_ACCOUNTS_PER_IP_DAY = int(os.environ.get("HG_MAX_PER_IP", "3"))
+_login_fail = {}
+
+
+def _ip():
+    return request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+
+
+def _iph():
+    return _h(IP_SALT + _ip())  # stored hashed, never the raw IP
+
+
+def _dev(d):
+    dev = str(d.get("dev") or "")
+    return dev if re.fullmatch(r"[A-Za-z0-9_-]{16,64}", dev) else ""
+
+
+def signup_block(d):
+    """One account per device, and a cap on new accounts per network per day."""
+    dev = _dev(d)
+    if not dev:
+        return "Please refresh the page and try again."
+    if q("select 1 from hg_devices where dev=?", (dev,), one=True):
+        return "This device already has an account. Log in with it instead."
+    n = q("select count(*) from hg_signups where iph=? and ts>?", (_iph(), time.time() - 86400), one=True)[0]
+    if n >= MAX_ACCOUNTS_PER_IP_DAY:
+        return "Too many new accounts from this network today. Try again tomorrow."
+    return ""
+
+
+def record_signup(d, uid):
+    q("insert into hg_devices (dev, uid, ts) values (?, ?, ?)", (_dev(d), uid, time.time()))
+    q("insert into hg_signups (iph, ts) values (?, ?)", (_iph(), time.time()))
+
+
+def new_session(uid):
+    key = secrets.token_urlsafe(24)
+    q("insert into hg_sessions (keyhash, uid, ts) values (?, ?, ?)", (_h(key), uid, time.time()))
+    return key
+
+
+def check_code(email, code):
+    row = q("select codehash, exp, tries from hg_codes where email=?", (email,), one=True)
+    if not row or row[1] < time.time() or row[2] >= 5:
+        return "That code expired. Ask for a new one."
+    if row[0] != _h(re.sub(r"\D", "", code or "")):
+        q("update hg_codes set tries=tries+1 where email=?", (email,))
+        return "Wrong code. Check your email and try again."
+    q("delete from hg_codes where email=?", (email,))
+    return ""
+
+
+def good_pw(pw):
+    return isinstance(pw, str) and 8 <= len(pw) <= 128
+
+
+@bp.post("/hg/api/register")
+def register():
+    from werkzeug.security import generate_password_hash
+    d = request.get_json(silent=True) or {}
+    email = (d.get("email") or "").strip().lower()[:120]
+    nick = clean_nick(d.get("nick"))
+    if not nick:
+        return {"error": "Pick a name of 2 to 20 letters or numbers."}, 400
+    if not good_pw(d.get("password")):
+        return {"error": "Password must be at least 8 characters."}, 400
+    if q("select 1 from hg_users where email=?", (email,), one=True):
+        return {"error": "That email already has an account. Log in instead."}, 400
+    blk = signup_block(d)
+    if blk:
+        return {"error": blk}, 403
+    err = check_code(email, d.get("code"))
+    if err:
+        return {"error": err}, 400
+    uid = secrets.token_hex(6)
+    q("insert into hg_users (uid, keyhash, nick, seen, email, pwhash) values (?, '', ?, ?, ?, ?)",
+      (uid, nick, time.time(), email, generate_password_hash(d["password"])))
+    record_signup(d, uid)
+    return {"uid": uid, "key": new_session(uid), "nick": nick}
+
+
+@bp.post("/hg/api/login")
+def login():
+    from werkzeug.security import check_password_hash
+    d = request.get_json(silent=True) or {}
+    email = (d.get("email") or "").strip().lower()[:120]
+    now = time.time()
+    fails = [t for t in _login_fail.get(email, []) if now - t < 900]
+    if len(fails) >= 8:
+        return {"error": "Too many wrong tries. Wait 15 minutes or reset your password."}, 429
+    row = q("select uid, nick, pwhash from hg_users where email=?", (email,), one=True)
+    if not row or not row[2] or not check_password_hash(row[2], str(d.get("password") or "")):
+        _login_fail[email] = fails + [now]
+        if row and not row[2]:
+            return {"error": "Set a password first: tap Forgot password."}, 400
+        return {"error": "Wrong email or password."}, 400
+    _login_fail.pop(email, None)
+    return {"uid": row[0], "key": new_session(row[0]), "nick": row[1]}
+
+
+@bp.post("/hg/api/reset")
+def reset_pw():
+    from werkzeug.security import generate_password_hash
+    d = request.get_json(silent=True) or {}
+    email = (d.get("email") or "").strip().lower()[:120]
+    if not good_pw(d.get("password")):
+        return {"error": "Password must be at least 8 characters."}, 400
+    row = q("select uid, nick from hg_users where email=?", (email,), one=True)
+    err = check_code(email, d.get("code")) if row else "That code expired. Ask for a new one."
+    if err:
+        return {"error": err}, 400
+    q("update hg_users set pwhash=? where uid=?", (generate_password_hash(d["password"]), row[0]))
+    q("delete from hg_sessions where uid=?", (row[0],))  # log out other devices
+    _login_fail.pop(email, None)
+    return {"uid": row[0], "key": new_session(row[0]), "nick": row[1]}
+
+
 _join_ip = {}
 
 
@@ -211,17 +338,13 @@ def quick_join():
     nick = clean_nick(d.get("nick"))
     if not nick:
         return {"error": "Pick a name of 2 to 20 letters or numbers."}, 400
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0]
-    now = time.time()
-    hits = [t for t in _join_ip.get(ip, []) if now - t < 3600]
-    if len(hits) >= 10:
-        return {"error": "Too many new accounts. Try again later."}, 429
-    _join_ip[ip] = hits + [now]
+    blk = signup_block(d)
+    if blk:
+        return {"error": blk}, 403
     uid = secrets.token_hex(6)
-    q("insert into hg_users (uid, keyhash, nick, seen, email) values (?, '', ?, ?, ?)", (uid, nick, now, None))
-    key = secrets.token_urlsafe(24)
-    q("insert into hg_sessions (keyhash, uid, ts) values (?, ?, ?)", (_h(key), uid, now))
-    return {"uid": uid, "key": key, "nick": nick}
+    q("insert into hg_users (uid, keyhash, nick, seen, email) values (?, '', ?, ?, ?)", (uid, nick, time.time(), None))
+    record_signup(d, uid)
+    return {"uid": uid, "key": new_session(uid), "nick": nick}
 
 
 @bp.post("/hg/api/verify")
@@ -236,6 +359,8 @@ def verify_code():
         q("update hg_codes set tries=tries+1 where email=?", (email,))
         return {"error": "Wrong code. Check your email and try again."}, 400
     user = q("select uid, nick from hg_users where email=?", (email,), one=True)
+    if not user:
+        return {"error": "Create an account first."}, 400
     if not user:
         nick = clean_nick(d.get("nick"))
         if not nick:
@@ -755,26 +880,45 @@ function av(u,n,pvv,cls){const st=pvv?'background-image:url(/hg/m/u/'+u+'?v='+pv
  return '<div class="av '+(cls||"")+'" data-p="'+u+'" style="'+st+'">'+(pvv?"":esc((n||"?")[0].toUpperCase()))+'</div>';}
 function ago(t){const s=Date.now()/1000-t;if(s<60)return "Just now";if(s<3600)return Math.floor(s/60)+"m";if(s<86400)return Math.floor(s/3600)+"h";if(s<604800)return Math.floor(s/86400)+"d";return new Date(t*1000).toLocaleDateString();}
 function wire(el){el.querySelectorAll("[data-p]").forEach(x=>x.onclick=e=>{e.stopPropagation();openProfile(x.dataset.p);});}
-/* ---------- auth (email code) ---------- */
-let aEmail="",aNew=false;
-function authStep1(msg){$("authcard").innerHTML=(msg?'<div style="color:#c4122f;font-size:14px">'+esc(msg)+'</div>':'')+
- '<input class="f" id="ae" type="email" placeholder="Email address" autocomplete="email"><button class="btn p w" id="ab">Continue with email</button>'+
- '<div style="font-size:13px;color:#65676b;text-align:center">We\'ll email you a 6-digit code. No password needed.</div>';
- $("ab").onclick=async()=>{aEmail=$("ae").value.trim();$("ab").disabled=true;try{const j=await api("code",{email:aEmail});aNew=j.new!==false;authStep2(j.dev_code);}catch(e){$("ab").disabled=false;authStep1(e.message);}};
- $("ae").onkeydown=e=>{if(e.key==="Enter")$("ab").click();};}
-function authStep2(dev,msg){$("authcard").innerHTML='<div style="font-size:15px">Enter the code we sent to <b>'+esc(aEmail)+'</b></div>'+(msg?'<div style="color:#c4122f;font-size:14px">'+esc(msg)+'</div>':'')+
- '<input class="f" id="ac" inputmode="numeric" maxlength="6" placeholder="6-digit code" style="letter-spacing:6px;text-align:center;font-size:22px" value="'+(dev||"")+'">'+
- (aNew?'<input class="f" id="an" maxlength="20" placeholder="Your name (shown to others)">':'')+
- '<button class="btn g w" id="av2">'+(aNew?"Create account":"Log in")+'</button><div style="text-align:center;font-size:14px"><a href="#" id="aback">Use a different email</a> \u00B7 <a href="#" id="aresend">Resend code</a></div><div style="font-size:13px;color:#65676b;text-align:center">Check your spam folder if it isn\'t in your inbox.</div>';
- $("aback").onclick=e=>{e.preventDefault();authStep1();};
- $("aresend").onclick=async e=>{e.preventDefault();try{await api("code",{email:aEmail});alert("New code sent.");}catch(err){alert(err.message);}};
- $("av2").onclick=async()=>{try{me=await api("verify",{email:aEmail,code:$("ac").value,nick:$("an")?$("an").value:""});localStorage.setItem("tg_me",JSON.stringify(me));$("auth").style.display="none";start();}
-  catch(e){if(e.data&&e.data.need_nick){aNew=true;authStep2($("ac").value,e.message);}else authStep2("",e.message);}};}
+/* ---------- auth (email + password, OTP to register/reset) ---------- */
+let DEV=localStorage.getItem("cc_dev");if(!DEV){DEV=(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)+Date.now()).replace(/[^A-Za-z0-9]/g,"");localStorage.setItem("cc_dev",DEV);}
+function done(j){me=j;localStorage.setItem("tg_me",JSON.stringify(me));$("auth").style.display="none";start();}
+function err(m){return m?'<div style="color:#c4122f;font-size:14px">'+esc(m)+'</div>':'';}
+function F(id,ph,type,extra){return '<input class="f" id="'+id+'" placeholder="'+ph+'" type="'+(type||"text")+'" '+(extra||"")+'>';}
+function showLogin(msg){$("authcard").innerHTML=err(msg)+F("le","Email address","email",'autocomplete="email"')+F("lp","Password","password",'autocomplete="current-password"')+
+ '<button class="btn p w" id="lb">Log in</button><div style="text-align:center"><a href="#" id="lf">Forgot password?</a></div><hr style="border:0;border-top:1px solid #dadde1;width:100%"><div style="text-align:center"><button class="btn g" id="lr" style="padding:12px 18px">Create new account</button></div>';
+ $("lb").onclick=async()=>{$("lb").disabled=true;try{done(await api("login",{email:$("le").value.trim(),password:$("lp").value}));}catch(e){showLogin(e.message);}};
+ $("lp").onkeydown=e=>{if(e.key==="Enter")$("lb").click();};
+ $("lf").onclick=e=>{e.preventDefault();showForgot();};$("lr").onclick=()=>showRegister();}
+let R={};
+function showRegister(msg){$("authcard").innerHTML='<div style="font-size:20px;font-weight:700">Create a new account</div><div style="font-size:13px;color:#65676b">It\'s quick and free. One account per phone.</div>'+err(msg)+
+ F("rn","Your name (shown to others)","text",'maxlength="20"')+F("re","Email address","email",'autocomplete="email"')+F("rp","New password (8+ characters)","password",'autocomplete="new-password"')+
+ '<label style="font-size:13px;color:#65676b"><input type="checkbox" id="rk"> I\'m 13 or older and I\'ll follow the rules.</label><button class="btn g w" id="rb">Sign up</button><div style="text-align:center"><a href="#" id="rl">Already have an account?</a></div>';
+ if(R.nick){$("rn").value=R.nick;$("re").value=R.email;}
+ $("rl").onclick=e=>{e.preventDefault();showLogin();};
+ $("rb").onclick=async()=>{R={nick:$("rn").value.trim(),email:$("re").value.trim(),password:$("rp").value};
+  if(!$("rk").checked)return showRegister("Please confirm you're 13 or older.");if(R.password.length<8)return showRegister("Password must be at least 8 characters.");
+  $("rb").disabled=true;try{const j=await api("code",{email:R.email,purpose:"register"});showCode("register",j.dev_code);}catch(e){showRegister(e.message);}};}
+let FG="";
+function showForgot(msg){$("authcard").innerHTML='<div style="font-size:20px;font-weight:700">Find your account</div><div style="font-size:14px;color:#65676b">Enter your email and we\'ll send a 6-digit code.</div>'+err(msg)+F("fe","Email address","email")+
+ '<button class="btn p w" id="fb">Send code</button><div style="text-align:center"><a href="#" id="fl">Back to log in</a></div>';
+ $("fl").onclick=e=>{e.preventDefault();showLogin();};
+ $("fb").onclick=async()=>{FG=$("fe").value.trim();$("fb").disabled=true;try{const j=await api("code",{email:FG,purpose:"reset"});showCode("reset",j.dev_code);}catch(e){showForgot(e.message);}};}
+function showCode(kind,dev,msg){const em=kind==="register"?R.email:FG;
+ $("authcard").innerHTML='<div style="font-size:15px">Enter the code we sent to <b>'+esc(em)+'</b></div>'+err(msg)+
+ '<input class="f" id="cc" inputmode="numeric" maxlength="6" placeholder="6-digit code" style="letter-spacing:6px;text-align:center;font-size:22px" value="'+(dev||"")+'">'+
+ (kind==="reset"?F("cp","New password (8+ characters)","password",'autocomplete="new-password"'):'')+
+ '<button class="btn g w" id="cb">'+(kind==="register"?"Confirm and create account":"Save new password")+'</button><div style="text-align:center;font-size:14px"><a href="#" id="cr">Resend code</a> \u00B7 <a href="#" id="cx">Back</a></div><div style="font-size:13px;color:#65676b;text-align:center">Check your spam folder if it isn\'t in your inbox.</div>';
+ $("cx").onclick=e=>{e.preventDefault();kind==="register"?showRegister():showForgot();};
+ $("cr").onclick=async e=>{e.preventDefault();try{await api("code",{email:em,purpose:kind});alert("New code sent.");}catch(x){alert(x.message);}};
+ $("cb").onclick=async()=>{$("cb").disabled=true;try{done(kind==="register"?await api("register",Object.assign({code:$("cc").value,dev:DEV},R)):await api("reset",{email:FG,code:$("cc").value,password:$("cp").value}));}
+  catch(e){showCode(kind,$("cc").value,e.message);}};}
+const authStep1=showLogin;
 function logout(){if(me)fetch("/hg/api/logout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:me.key})});me=null;localStorage.removeItem("tg_me");location.reload();}
 function quickJoin(msg){$("authcard").innerHTML=(msg?'<div style="color:#c4122f;font-size:14px">'+esc(msg)+'</div>':'')+
  '<div style="font-size:14px;color:#65676b;text-align:center">Preview: email sign-in is coming soon. For now just pick a name. This account lives on this phone only.</div>'+
  '<input class="f" id="qn" maxlength="20" placeholder="Your name (shown to others)"><button class="btn g w" id="qb">Join Campus Connect</button>';
- $("qb").onclick=async()=>{$("qb").disabled=true;try{me=await api("quickjoin",{nick:$("qn").value});localStorage.setItem("tg_me",JSON.stringify(me));$("auth").style.display="none";start();}catch(e){quickJoin(e.message);}};
+ $("qb").onclick=async()=>{$("qb").disabled=true;try{me=await api("quickjoin",{nick:$("qn").value,dev:DEV});localStorage.setItem("tg_me",JSON.stringify(me));$("auth").style.display="none";start();}catch(e){quickJoin(e.message);}};
  $("qn").onkeydown=e=>{if(e.key==="Enter")$("qb").click();};}
 if(me)$("auth").style.display="none";else api("mode").then(j=>j.email?authStep1():quickJoin()).catch(()=>authStep1());
 if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
