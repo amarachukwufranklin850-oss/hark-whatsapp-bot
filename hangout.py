@@ -124,14 +124,14 @@ def send_code_email(email, code):
     if not key:
         return False
     import requests
-    html_body = (f"<div style='font-family:sans-serif;font-size:16px'><p>Your Tygars Hangout code is</p>"
+    html_body = (f"<div style='font-family:sans-serif;font-size:16px'><p>Your Campus Connect code is</p>"
                  f"<p style='font-size:32px;font-weight:bold;letter-spacing:6px'>{code}</p>"
                  f"<p>It expires in 10 minutes. If you didn't ask for it, ignore this email.</p>"
-                 f"<p style='color:#888;font-size:12px'>Tygars Hangout is a free, unofficial fan-made site.</p></div>")
+                 f"<p style='color:#888;font-size:12px'>Campus Connect is a free, unofficial fan-made site.</p></div>")
     r = requests.post("https://api.brevo.com/v3/smtp/email", timeout=15,
                       headers={"api-key": key, "Content-Type": "application/json"},
-                      json={"sender": {"name": "Tygars Hangout", "email": sender}, "to": [{"email": email}],
-                            "subject": f"{code} is your Tygars Hangout code", "htmlContent": html_body})
+                      json={"sender": {"name": "Campus Connect", "email": sender}, "to": [{"email": email}],
+                            "subject": f"{code} is your Campus Connect code", "htmlContent": html_body})
     if r.status_code >= 300:
         print("brevo error:", r.status_code, r.text[:200])
     return r.status_code < 300
@@ -188,6 +188,40 @@ def send_code():
         return {"error": "Email sign-in isn't ready yet. Please try again later."}, 503
     new = not q("select 1 from hg_users where email=?", (email,), one=True)
     return {"ok": True, "new": new}
+
+
+def _email_ready():
+    return bool(os.environ.get("BREVO_API_KEY")) or os.environ.get("HG_DEV_CODES") == "1"
+
+
+@bp.post("/hg/api/mode")
+def mode():
+    return {"email": _email_ready()}
+
+
+_join_ip = {}
+
+
+@bp.post("/hg/api/quickjoin")
+def quick_join():
+    """Name-only preview join, only while email sign-in isn't set up."""
+    if _email_ready():
+        return {"error": "Please sign in with email."}, 403
+    d = request.get_json(silent=True) or {}
+    nick = clean_nick(d.get("nick"))
+    if not nick:
+        return {"error": "Pick a name of 2 to 20 letters or numbers."}, 400
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0]
+    now = time.time()
+    hits = [t for t in _join_ip.get(ip, []) if now - t < 3600]
+    if len(hits) >= 10:
+        return {"error": "Too many new accounts. Try again later."}, 429
+    _join_ip[ip] = hits + [now]
+    uid = secrets.token_hex(6)
+    q("insert into hg_users (uid, keyhash, nick, seen, email) values (?, '', ?, ?, ?)", (uid, nick, now, None))
+    key = secrets.token_urlsafe(24)
+    q("insert into hg_sessions (keyhash, uid, ts) values (?, ?, ?)", (_h(key), uid, now))
+    return {"uid": uid, "key": key, "nick": nick}
 
 
 @bp.post("/hg/api/verify")
@@ -269,6 +303,42 @@ def media(kind, key):
     mime = head[5:].split(";")[0]
     resp = Response(base64.b64decode(b64), mimetype=mime)
     resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+MANIFEST = {"name": "Campus Connect: for SUMAS students (unofficial)", "short_name": "Campus Connect",
+            "start_url": "/hangout", "scope": "/", "display": "standalone", "background_color": "#f0f2f5",
+            "theme_color": "#1877f2", "description": "Free, unofficial social app made by students. Not run by SUMAS.",
+            "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                      {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
+                      {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}]}
+
+
+@bp.get("/manifest.webmanifest")
+def manifest():
+    import json
+    return Response(json.dumps(MANIFEST), mimetype="application/manifest+json")
+
+
+@bp.get("/icon-<int:size>.png")
+def icon(size):
+    if size not in (192, 512):
+        return "", 404
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"icon-{size}.png")
+    resp = Response(open(path, "rb").read(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
+
+
+@bp.get("/sw.js")
+def sw():
+    js = ("self.addEventListener('install',e=>self.skipWaiting());"
+          "self.addEventListener('activate',e=>self.clients.claim());"
+          "self.addEventListener('fetch',e=>{if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(()=>"
+          "new Response('<h2 style=\"font-family:sans-serif;text-align:center;margin-top:40vh\">You are offline. Check your internet.</h2>',"
+          "{headers:{'Content-Type':'text/html'}})));}});")
+    resp = Response(js, mimetype="application/javascript")
+    resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 
@@ -588,7 +658,7 @@ def page():
 
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Tygars</title><link rel="icon" href="/logo.jpg"><link rel="apple-touch-icon" href="/logo.jpg">
+<title>Campus Connect</title><link rel="icon" href="/logo.jpg"><link rel="apple-touch-icon" href="/logo.jpg"><link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#1877f2">
 <style>
 *{box-sizing:border-box}html,body{height:100%;margin:0}
@@ -649,12 +719,12 @@ h2{font-size:20px;margin:4px 0 10px}h4{margin:10px 0 4px;color:#65676b;font-size
 #auth .card>*{margin-bottom:10px}.rules{font-size:13px;color:#65676b;text-align:center;max-width:380px}
 .nt{display:flex;gap:10px;align-items:center;padding:8px;border-radius:8px;cursor:pointer}.nt.new{background:#e7f3ff}.nt small{color:#1877f2;display:block}
 </style></head><body>
-<div id="auth"><img class="logo" src="/logo.jpg" alt="Tygars logo"><h1>tygars</h1>
-<div class="tag">Connect with students and friends across Africa.</div>
+<div id="auth"><img class="logo" src="/logo.jpg" alt="Campus Connect logo"><h1>campus connect</h1>
+<div class="tag">Connect with SUMAS students and friends. Unofficial, made by students.</div>
 <div class="card" id="authcard"></div>
 <div class="rules">Free and unofficial fan-made site. Be kind, no scams, and never share passwords or your home address. 13+ only.</div></div>
-<div class="top"><div class="bar"><div class="brand"><img src="/logo.jpg" alt="">tygars</div>
-<div class="sbox">&#x1F50D;<input id="sq" placeholder="Search Tygars"></div></div>
+<div class="top"><div class="bar"><div class="brand"><img src="/logo.jpg" alt="">connect</div>
+<div class="sbox">&#x1F50D;<input id="sq" placeholder="Search Campus Connect"></div></div>
 <div class="tabs"><button class="on" data-v="feed">&#x1F3E0;</button><button data-v="friends">&#x1F465;<span id="nbf"></span></button>
 <button data-v="chat">&#x1F4AC;</button><button data-v="notifs">&#x1F514;<span id="nbn"></span></button><button data-v="me">&#x2630;</button></div></div>
 <main>
@@ -701,7 +771,13 @@ function authStep2(dev,msg){$("authcard").innerHTML='<div style="font-size:15px"
  $("av2").onclick=async()=>{try{me=await api("verify",{email:aEmail,code:$("ac").value,nick:$("an")?$("an").value:""});localStorage.setItem("tg_me",JSON.stringify(me));$("auth").style.display="none";start();}
   catch(e){if(e.data&&e.data.need_nick){aNew=true;authStep2($("ac").value,e.message);}else authStep2("",e.message);}};}
 function logout(){if(me)fetch("/hg/api/logout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:me.key})});me=null;localStorage.removeItem("tg_me");location.reload();}
-if(me)$("auth").style.display="none";else authStep1();
+function quickJoin(msg){$("authcard").innerHTML=(msg?'<div style="color:#c4122f;font-size:14px">'+esc(msg)+'</div>':'')+
+ '<div style="font-size:14px;color:#65676b;text-align:center">Preview: email sign-in is coming soon. For now just pick a name. This account lives on this phone only.</div>'+
+ '<input class="f" id="qn" maxlength="20" placeholder="Your name (shown to others)"><button class="btn g w" id="qb">Join Campus Connect</button>';
+ $("qb").onclick=async()=>{$("qb").disabled=true;try{me=await api("quickjoin",{nick:$("qn").value});localStorage.setItem("tg_me",JSON.stringify(me));$("auth").style.display="none";start();}catch(e){quickJoin(e.message);}};
+ $("qn").onkeydown=e=>{if(e.key==="Enter")$("qb").click();};}
+if(me)$("auth").style.display="none";else api("mode").then(j=>j.email?authStep1():quickJoin()).catch(()=>authStep1());
+if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
 /* ---------- nav ---------- */
 document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>show(b.dataset.v));
 function show(v){view=v;document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.v===v));
@@ -827,7 +903,7 @@ function menuView(){const box=$("v-me");
  '<div class="card"><div class="row"><div class="nm">Your friend code<small>'+me.uid+'</small></div></div>'+
  (blocked.length?'<div class="row"><div class="nm">Blocked people<small>'+blocked.length+' blocked</small></div><button class="btn s" id="ub">Unblock all</button></div>':'')+
  '<div class="row"><div class="nm">Rules<small>Be kind. No scams, bullying or sharing private info. Report anything bad.</small></div></div>'+
- '<button class="btn w" id="lo">Log out</button></div><div style="text-align:center;color:#65676b;font-size:12px;padding:10px">Tygars \u00B7 free, unofficial fan-made site</div>';
+ '<button class="btn w" id="lo">Log out</button></div><div style="text-align:center;color:#65676b;font-size:12px;padding:10px">Campus Connect \u00B7 free, unofficial student-made site, not run by SUMAS</div>';
  $("mp").onclick=()=>openProfile(me.uid);$("lo").onclick=logout;
  if($("ub"))$("ub").onclick=async()=>{for(const u of blocked)await api("friend",{action:"unblock",to:u});await badges();menuView();};}
 if(me)start();
