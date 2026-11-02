@@ -656,10 +656,15 @@ header a{font-weight:400;font-size:14px;color:var(--tg-theme-link-color,#2a8af6)
 form{display:flex;gap:8px;padding:10px;border-top:1px solid #8883}
 textarea{flex:1;resize:none;padding:11px;border-radius:20px;border:1px solid #8884;font:inherit;font-size:16px;max-height:120px;background:var(--tg-theme-secondary-bg-color,#f3f3f3);color:inherit}
 button{border:0;border-radius:50%;width:44px;height:44px;font-size:18px;background:var(--tg-theme-button-color,#2a8af6);color:var(--tg-theme-button-text-color,#fff)}
+button.sm{width:auto;height:30px;border-radius:15px;padding:0 10px;font-size:14px;background:var(--tg-theme-secondary-bg-color,#eee);color:inherit}
+button.on{background:#e53935;color:#fff}
+#mic.rec{background:#e53935;animation:p 1s infinite}@keyframes p{50%{opacity:.6}}
+#st{text-align:center;font-size:13px;opacity:.7;min-height:0}
 </style></head><body>
-<header><span>\U0001F42F Tygars Chat</span><a href="/browse">Browse</a></header>
+<header><span>\U0001F42F Tygars Chat</span><span><button id="spk" class="sm" title="Speak replies">\U0001F507</button> <button id="live" class="sm" title="Live voice chat">\U0001F399 Live</button> <a href="/browse">Browse</a></span></header>
+<div id="st"></div>
 <div id="log"><div class="hint">Ask me anything. I'll answer live.</div></div>
-<form id="f"><textarea id="q" rows="1" placeholder="Message Tygars"></textarea><button>\u27A4</button></form>
+<form id="f"><button type="button" id="mic" title="Talk">\U0001F3A4</button><textarea id="q" rows="1" placeholder="Message Tygars"></textarea><button>\u27A4</button></form>
 <script>
 const tg=window.Telegram&&Telegram.WebApp; if(tg){tg.ready();tg.expand();}
 const log=document.getElementById("log"), q=document.getElementById("q");
@@ -671,10 +676,46 @@ document.getElementById("f").onsubmit=async e=>{e.preventDefault();const t=q.val
  add("u",t);q.value="";q.style.height="auto";const b=add("b","\u2026");
  try{const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
    body:JSON.stringify({text:t,initData:tg?tg.initData:""})});const j=await r.json();
-   const words=(j.reply||"Sorry, something went wrong.").split(/(\\s+)/);b.textContent="";
-   for(const w of words){b.textContent+=w;log.scrollTop=log.scrollHeight;await new Promise(r=>setTimeout(r,18));}
+   await type(b,j.reply||"Sorry, something went wrong.");
+   if(speak&&j.reply){fetch("/api/tts",{method:"POST",headers:{"Content-Type":"application/json"},
+     body:JSON.stringify({text:j.reply,initData:tg?tg.initData:""})}).then(r=>r.json()).then(k=>{if(k.audio)play(k.audio);});}
  }catch(err){b.textContent="Connection problem. Please try again.";}
 };
+async function type(b,t){const w=t.split(/(\\s+)/);b.textContent="";for(const x of w){b.textContent+=x;log.scrollTop=log.scrollHeight;await new Promise(r=>setTimeout(r,18));}}
+let speak=false, live=false, rec=null, stream=null, player=null;
+const st=document.getElementById("st"), mic=document.getElementById("mic");
+function status(t){st.textContent=t||"";}
+document.getElementById("spk").onclick=e=>{speak=!speak;e.target.textContent=speak?"\U0001F50A":"\U0001F507";};
+function play(b64){return new Promise(res=>{if(player)player.pause();player=new Audio("data:audio/mpeg;base64,"+b64);
+  player.onended=res;player.onerror=res;player.play().catch(res);});}
+async function listen(){
+ if(rec)return; if(player)player.pause();
+ try{stream=stream||await navigator.mediaDevices.getUserMedia({audio:true});}
+ catch(e){status("Microphone blocked. Allow mic access for Telegram, then try again.");stopLive();return;}
+ const type=["audio/webm","audio/mp4","audio/ogg"].find(t=>window.MediaRecorder&&MediaRecorder.isTypeSupported(t))||"";
+ rec=new MediaRecorder(stream,type?{mimeType:type}:{}); const chunks=[]; rec.ondataavailable=e=>chunks.push(e.data);
+ const ctx=new (window.AudioContext||window.webkitAudioContext)(), an=ctx.createAnalyser(); ctx.createMediaStreamSource(stream).connect(an);
+ const buf=new Uint8Array(an.fftSize); let heard=false, quiet=Date.now(), start=Date.now();
+ const tick=setInterval(()=>{an.getByteTimeDomainData(buf);let m=0;for(const v of buf)m=Math.max(m,Math.abs(v-128));
+   if(m>12){heard=true;quiet=Date.now();}
+   if((heard&&Date.now()-quiet>1500)||Date.now()-start>30000||(!heard&&live&&Date.now()-start>12000)){if(rec&&rec.state==="recording")rec.stop();}},120);
+ rec.onstop=async()=>{clearInterval(tick);ctx.close();mic.classList.remove("rec");const r0=rec;rec=null;
+   if(!heard){status(live?"Didn't catch anything. Live chat paused.":"");stopLive();return;}
+   status("Thinking\u2026");const blob=new Blob(chunks,{type:r0.mimeType||"audio/webm"});
+   const h=log.querySelector(".hint");if(h)h.remove();const u=add("u","\U0001F3A4 \u2026"),b=add("b","\u2026");
+   const fd=new FormData();fd.append("audio",blob,"voice");fd.append("initData",tg?tg.initData:"");fd.append("speak",(live||speak)?"1":"0");
+   try{const j=await (await fetch("/api/voice",{method:"POST",body:fd})).json();
+     u.textContent="\U0001F3A4 "+(j.heard||"(couldn't hear)");await type(b,j.reply||"I didn't catch that.");
+     if(j.audio){status("Speaking\u2026");await play(j.audio);}
+   }catch(e){b.textContent="Connection problem. Please try again.";}
+   status(live?"Listening\u2026":"");if(live)listen();};
+ rec.start();mic.classList.add("rec");status(live?"Listening\u2026 talk any time":"Listening\u2026 tap the mic to send");
+}
+mic.onclick=()=>{if(rec&&rec.state==="recording")rec.stop();else listen();};
+const lb=document.getElementById("live");
+function stopLive(){live=false;lb.classList.remove("on");lb.textContent="\U0001F399 Live";}
+lb.onclick=()=>{if(live){stopLive();if(rec&&rec.state==="recording")rec.stop();if(player)player.pause();status("");return;}
+ live=true;lb.classList.add("on");lb.textContent="\u23F9 End";listen();};
 </script></body></html>"""
 
 
@@ -713,6 +754,56 @@ def chat_api():
     if not text:
         return {"reply": ""}
     return {"reply": ask_ai(f"tg:{uid}", text)}
+
+
+def transcribe(name, audio):
+    r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+                      headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                      files={"file": (name, audio)},
+                      data={"model": "whisper-large-v3-turbo"}, timeout=60)
+    r.raise_for_status()
+    return (r.json().get("text") or "").strip()
+
+
+@app.post("/api/voice")
+def voice_api():
+    import base64
+    uid = tg_user_from_init(request.form.get("initData", ""))
+    if not uid:
+        return {"reply": "Please open Tygars Chat from inside the Telegram bot."}, 403
+    f = request.files.get("audio")
+    if not f:
+        return {"reply": "No audio received."}, 400
+    audio = f.read(8_000_000)
+    ext = "mp4" if "mp4" in (f.mimetype or "") else "ogg" if "ogg" in (f.mimetype or "") else "webm"
+    try:
+        heard = transcribe(f"voice.{ext}", audio)
+    except Exception as e:
+        print("live voice stt error:", e)
+        return {"heard": "", "reply": "Sorry, I couldn't hear that. Please try again."}
+    if not heard:
+        return {"heard": "", "reply": ""}
+    reply = ask_ai(f"tg:{uid}", heard)
+    out = {"heard": heard, "reply": reply}
+    if request.form.get("speak", "1") == "1":
+        try:
+            out["audio"] = base64.b64encode(tts_mp3(reply)).decode()
+        except Exception as e:
+            print("live voice tts error:", e)
+    return out
+
+
+@app.post("/api/tts")
+def tts_api():
+    import base64
+    d = request.get_json(silent=True) or {}
+    if not tg_user_from_init(d.get("initData", "")):
+        return {}, 403
+    try:
+        return {"audio": base64.b64encode(tts_mp3((d.get("text") or "")[:1500])).decode()}
+    except Exception as e:
+        print("tts api error:", e)
+        return {}
 
 
 @app.get("/browse")
