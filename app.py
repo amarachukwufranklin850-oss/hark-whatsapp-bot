@@ -12,6 +12,8 @@ from xml.sax.saxutils import escape
 from flask import Flask, request, Response
 
 app = Flask(__name__)
+from hangout import bp as hangout_bp
+app.register_blueprint(hangout_bp)
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")        # any secret word you make up
 WA_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")          # Meta access token
