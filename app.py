@@ -30,7 +30,12 @@ SYSTEM = (
     "Write the way Hark does: answer first, short sentences, contractions, warm and precise, "
     "one clear pick when asked to choose, no filler like 'Great question'. Keep replies short "
     "enough for a chat. Use the web_search tool for anything current or that you are unsure of "
-    "(news, prices, scores, dates), and mention the source briefly. For medical, legal or money emergencies, advise a professional. "
+    "(news, prices, scores, dates). Only give verified information: state a current fact only "
+    "if the search results support it, prefer trusted outlets (BBC, Reuters, AP, ESPN, Punch, "
+    "Channels, official sites), and name the source and date, e.g. '(BBC, 1 Nov 2026)'. If "
+    "sources disagree, or none confirm it, say you couldn't verify it instead of guessing. Never "
+    "invent scores, quotes, numbers or links. "
+    "For medical, legal or money emergencies, advise a professional. "
     "If asked who you are, say you're Tygars Bot. Never claim to be Hark itself or to be "
     "made by Hark; you're fan-made and not affiliated with Hark."
 )
@@ -227,7 +232,7 @@ def ask_ai(user, text):
             final = [{"role": "system", "content": sys_msg}] + past[:-1] + [{
                 "role": "user",
                 "content": text + "\n\nWeb search results:\n" + "\n\n".join(found)
-                           + "\n\nAnswer using these results; prefer the newest dated items and give scores/dates exactly. Plain text, short."}]
+                           + "\n\nAnswer using these results; prefer the newest dated items from trusted outlets, give scores/dates exactly, name the source and date, and if nothing confirms it say you couldn't verify it. Plain text, short."}]
             try:
                 m = groq(final, tools=False)
             except Exception:
