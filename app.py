@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 import threading
 import requests
 from xml.sax.saxutils import escape
@@ -151,26 +153,40 @@ def web_search(query):
                 out.append(f"- {x.get('title')}: {x.get('content','')[:300]} ({x.get('url')})")
         else:
             try:
+                rss = requests.get("https://news.google.com/rss/search", timeout=12,
+                                   params={"q": query, "hl": "en-NG", "gl": "NG", "ceid": "NG:en"})
+                root = ET.fromstring(rss.content)
+                items = sorted(root.iter("item"),
+                               key=lambda i: parsedate_to_datetime(i.findtext("pubDate") or "Thu, 01 Jan 1970 00:00:00 GMT"),
+                               reverse=True)[:8]
+                for i in items:
+                    out.append(f"- [{i.findtext('pubDate')}] {i.findtext('title')}")
+            except Exception as e:
+                print("news error:", e)
+            try:
                 d = requests.get("https://api.duckduckgo.com/", timeout=15,
                                  params={"q": query, "format": "json", "no_html": 1}).json()
                 if d.get("AbstractText"):
                     out.append(f"{d['AbstractText']} ({d.get('AbstractURL')})")
             except Exception as e:
                 print("ddg error:", e)
-            w = requests.get("https://en.wikipedia.org/w/api.php", timeout=15,
+            try:
+                w = requests.get("https://en.wikipedia.org/w/api.php", timeout=10,
                              headers={"User-Agent": "HarkFanAfricaBot/1.0"},
                              params={"action": "query", "list": "search", "srsearch": query,
-                                     "format": "json", "srlimit": 3}).json()
-            for x in w.get("query", {}).get("search", []):
-                snip = x["snippet"].replace('<span class="searchmatch">', "").replace("</span>", "")
-                out.append(f"- {x['title']}: {snip}")
+                                     "format": "json", "srlimit": 2}).json()
+                for x in w.get("query", {}).get("search", []):
+                    snip = x["snippet"].replace('<span class="searchmatch">', "").replace("</span>", "")
+                    out.append(f"- {x['title']}: {snip}")
+            except Exception as e:
+                print("wiki error:", e)
     except Exception as e:
         print("search error:", e)
     return "\n".join(out) or "No results found."
 
 
 def groq(messages, tools=True, model=None):
-    body = {"model": model or MODEL, "messages": messages, "max_tokens": 1500}
+    body = {"model": model or MODEL, "messages": messages, "max_tokens": 900}
     if (model or MODEL).startswith("openai/"):
         body["reasoning_effort"] = "low"
     if tools:
@@ -194,7 +210,7 @@ def ask_ai(user, text):
         m = groq(msgs)
         found = []
         rounds = 0
-        while m.get("tool_calls") and rounds < 2:
+        while m.get("tool_calls") and rounds < 1:
             rounds += 1
             msgs.append({"role": "assistant", "tool_calls": m["tool_calls"]})
             for c in m["tool_calls"]:
@@ -205,13 +221,13 @@ def ask_ai(user, text):
                 res = web_search(q)
                 found.append(f"Search: {q}\n{res}")
                 msgs.append({"role": "tool", "tool_call_id": c["id"], "content": res})
-            m = groq(msgs) if rounds < 2 else {"tool_calls": True}
+            m = {"tool_calls": True}
         if m.get("tool_calls"):
             # final answer from what was found, with tools switched off entirely
             final = [{"role": "system", "content": sys_msg}] + past[:-1] + [{
                 "role": "user",
                 "content": text + "\n\nWeb search results:\n" + "\n\n".join(found)
-                           + "\n\nAnswer using these results. Plain text, short."}]
+                           + "\n\nAnswer using these results; prefer the newest dated items and give scores/dates exactly. Plain text, short."}]
             try:
                 m = groq(final, tools=False)
             except Exception:
@@ -258,8 +274,27 @@ def telegram_reply(chat, text):
         reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything: school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
+        try:
+            requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
+                          json={"chat_id": chat, "action": "typing"}, timeout=5)
+        except Exception:
+            pass
         reply = ask_ai(f"tg:{chat}", text)
     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                       json={"chat_id": chat, "text": reply}, timeout=20)
     if r.status_code >= 300:
         print("Telegram error:", r.status_code, r.text)
+
+
+def keep_awake():
+    """Ping our own public URL every 10 minutes so the free Render instance doesn't sleep."""
+    url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    while url:
+        time.sleep(600)
+        try:
+            requests.get(url, timeout=20)
+        except Exception as e:
+            print("keep-awake error:", e)
+
+
+threading.Thread(target=keep_awake, daemon=True).start()
