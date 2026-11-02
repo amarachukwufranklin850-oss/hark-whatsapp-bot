@@ -760,6 +760,10 @@ def send_voice(chat, text, caption=""):
 def telegram_reply(chat, text, reply_to_text=""):
     low0 = text.strip().lower()
     mode = take_mode(chat) if not text.startswith("/") else (pending_mode.pop(chat, None) and None)
+    if mode == "betcode":
+        return betconv.reply_code(chat, text, tg_send)
+    if low0.startswith("/convert"):
+        return betconv.convert_cmd(chat, text, tg_send)
     if mode == "image":
         return telegram_image_reply(chat, "/image " + text)
     if mode == "video":
@@ -1179,7 +1183,8 @@ def main_menu():
             [{"text": "\U0001F50A Text to speech", "callback_data": "m:tts"}, {"text": "\U0001F3A4 Speech to text", "callback_data": "m:stt"}],
             [{"text": "\U0001F4C4 Make a PDF", "callback_data": "m:pdf"}, {"text": "\u23F0 Reminders", "callback_data": "m:remind"}],
             [{"text": "\U0001F4DD To-do list", "callback_data": "m:todo"}, {"text": "\U0001F4AC Live chat", "web_app": {"url": BROWSE_URL.replace("/browse", "/chat")}}],
-            [{"text": "\U0001F5A5 Open a website", "callback_data": "m:web"}, {"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}]]
+            [{"text": "\U0001F5A5 Open a website", "callback_data": "m:web"}, {"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}],
+            [{"text": "\U0001F3AB Bet code converter", "callback_data": "m:betconv"}]]
     rows += [[{"text": f"\U0001D54F Follow {h} on X", "url": u}] for h, u in X_HANDLES]
     return {"inline_keyboard": rows}
 
@@ -1203,7 +1208,12 @@ def telegram_callback(cb):
     if not chat:
         return
     try:
-        if data.startswith("m:"):
+        if data == "m:betconv":
+            pending_mode.pop(chat, None)
+            betconv.start(chat, tg_send)
+        elif data.startswith("bc:"):
+            betconv.on_callback(chat, data, tg_send, pending_mode)
+        elif data.startswith("m:"):
             k = data[2:]
             if k == "remind" and tq("select count(*) from bot_reminders where chat=?", (chat,), fetch=True)[0][0]:
                 list_reminders(chat)
@@ -1529,3 +1539,4 @@ def keep_awake():
 
 
 threading.Thread(target=keep_awake, daemon=True).start()
+betconv.init(_launch, ensure_browser, _pw_lock)
