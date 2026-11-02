@@ -42,7 +42,8 @@ SCHEMA_PG += [
 ]
 ALTERS = ["alter table hg_users add column email text", "alter table hg_users add column photo_v int default 0",
           "alter table hg_posts add column img int default 0", "alter table hg_users add column bio text default ''",
-          "alter table hg_users add column pwhash text"]
+          "alter table hg_users add column pwhash text",
+          "alter table hg_users add column created double precision"]
 SCHEMA_LITE = [s.replace("bigserial primary key", "integer primary key autoincrement")
                .replace("double precision", "real").replace("bigint", "integer") for s in SCHEMA_PG]
 
@@ -127,14 +128,14 @@ def send_code_email(email, code):
     if not key:
         return False
     import requests
-    html_body = (f"<div style='font-family:sans-serif;font-size:16px'><p>Your Campus Connect code is</p>"
+    html_body = (f"<div style='font-family:sans-serif;font-size:16px'><p>Your SUMAS Campus Connect code is</p>"
                  f"<p style='font-size:32px;font-weight:bold;letter-spacing:6px'>{code}</p>"
                  f"<p>It expires in 10 minutes. If you didn't ask for it, ignore this email.</p>"
                  f"<p style='color:#888;font-size:12px'>Campus Connect is a free, unofficial fan-made site.</p></div>")
     r = requests.post("https://api.brevo.com/v3/smtp/email", timeout=15,
                       headers={"api-key": key, "Content-Type": "application/json"},
-                      json={"sender": {"name": "Campus Connect", "email": sender}, "to": [{"email": email}],
-                            "subject": f"{code} is your Campus Connect code", "htmlContent": html_body})
+                      json={"sender": {"name": "SUMAS Campus Connect", "email": sender}, "to": [{"email": email}],
+                            "subject": f"{code} is your SUMAS Campus Connect code", "htmlContent": html_body})
     if r.status_code >= 300:
         print("brevo error:", r.status_code, r.text[:200])
     return r.status_code < 300
@@ -143,6 +144,47 @@ def send_code_email(email, code):
 def clean_nick(n):
     n = re.sub(r"[^\w .\-]", "", (n or "").strip())[:20].strip()
     return n if len(n) >= 2 and not BAD.search(n) else ""
+
+
+# ---------- anti-fraud ----------
+NEW_HOURS = 24  # new accounts: no links, no money talk, fewer friend requests
+SCAM = re.compile(r"\b(bvn|nin\s*number|atm\s*pin|card\s*pin|otp|cvv|recharge\s*card|airtime|"
+                  r"send\s*(me\s*)?money|transfer\s*(to|money)|account\s*(number|no)|acct\s*no|opay|palmpay|moniepoint|"
+                  r"double\s*your|investment\s*plan|forex\s*signal|crypto\s*invest|loan\s*offer|giveaway|"
+                  r"admission\s*(racket|slot|for\s*sale)|buy\s*admission|pay\s*for\s*(admission|result|grade)|"
+                  r"upgrade\s*(your\s*)?(result|grade)|exam\s*(leak|expo|runs?))\b", re.I)
+ACCT_NUM = re.compile(r"(?<!\d)\d{10,11}(?!\d)")  # bank account / phone numbers
+LINK = re.compile(r"(https?://|www\.|\b[\w-]+\.(com|ng|net|org|xyz|link|ly|me|io)\b|wa\.me|t\.me)", re.I)
+
+
+def account_age_h(uid):
+    r = q("select created from hg_users where uid=?", (uid,), one=True)
+    return 9999 if not r or not r[0] else (time.time() - r[0]) / 3600
+
+
+def fraud_check(uid, text):
+    """Returns an error message to show, or '' if the text is fine."""
+    if SCAM.search(text):
+        return ("Blocked for safety: no money requests, PINs, OTPs, BVN, account details, "
+                "admission or result deals. Report anyone who asks for these.")
+    if ACCT_NUM.search(text):
+        return "Blocked for safety: don't share phone or account numbers here."
+    if LINK.search(text) and account_age_h(uid) < NEW_HOURS:
+        return "New accounts can share links after 24 hours."
+    return ""
+
+
+_freq = {}
+
+
+def friend_rate_ok(uid):
+    now = time.time()
+    cap = 10 if account_age_h(uid) < NEW_HOURS else 40
+    hits = [t for t in _freq.get(uid, []) if now - t < 86400]
+    if len(hits) >= cap:
+        return False
+    _freq[uid] = hits + [now]
+    return True
 
 
 def friends_of(uid):
@@ -284,8 +326,8 @@ def register():
     if err:
         return {"error": err}, 400
     uid = secrets.token_hex(6)
-    q("insert into hg_users (uid, keyhash, nick, seen, email, pwhash) values (?, '', ?, ?, ?, ?)",
-      (uid, nick, time.time(), email, generate_password_hash(d["password"])))
+    q("insert into hg_users (uid, keyhash, nick, seen, email, pwhash, created) values (?, '', ?, ?, ?, ?, ?)",
+      (uid, nick, time.time(), email, generate_password_hash(d["password"]), time.time()))
     record_signup(d, uid)
     return {"uid": uid, "key": new_session(uid), "nick": nick}
 
@@ -342,7 +384,8 @@ def quick_join():
     if blk:
         return {"error": blk}, 403
     uid = secrets.token_hex(6)
-    q("insert into hg_users (uid, keyhash, nick, seen, email) values (?, '', ?, ?, ?)", (uid, nick, time.time(), None))
+    q("insert into hg_users (uid, keyhash, nick, seen, email, created) values (?, '', ?, ?, ?, ?)",
+      (uid, nick, time.time(), None, time.time()))
     record_signup(d, uid)
     return {"uid": uid, "key": new_session(uid), "nick": nick}
 
@@ -431,7 +474,7 @@ def media(kind, key):
     return resp
 
 
-MANIFEST = {"name": "Campus Connect: for SUMAS students (unofficial)", "short_name": "Campus Connect",
+MANIFEST = {"name": "SUMAS Campus Connect (unofficial)", "short_name": "SUMAS Connect",
             "start_url": "/hangout", "scope": "/", "display": "standalone", "background_color": "#f0f2f5",
             "theme_color": "#1877f2", "description": "Free, unofficial social app made by students. Not run by SUMAS.",
             "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
@@ -534,6 +577,9 @@ def send():
     now = time.time()
     if not rate_ok(uid):
         return {"error": "Slow down a little."}, 429
+    bad = fraud_check(uid, text)
+    if bad:
+        return {"error": bad}, 400
     text = BAD.sub(lambda m: "*" * len(m.group(0)), text)
     q("insert into hg_msgs (room, uid, nick, body, ts) values (?, ?, ?, ?, ?)", (room, uid, nick, text, now))
     if room == "hangout" and int(now) % 20 == 0:
@@ -614,6 +660,9 @@ def new_post():
         return {"error": "Write something or add a photo first."}, 400
     if not rate_ok("p" + uid, 20):
         return {"error": "Wait a few seconds before posting again."}, 429
+    bad = fraud_check(uid, text) if text else ""
+    if bad:
+        return {"error": bad}, 400
     ts = time.time()
     q("insert into hg_posts (uid, nick, body, ts, img) values (?, ?, ?, ?, 0)", (uid, nick, text, ts))
     pid = q("select id from hg_posts where uid=? and ts=?", (uid, ts), one=True)[0]
@@ -681,6 +730,9 @@ def comment():
         return {"ok": True}
     if not rate_ok(uid):
         return {"error": "Slow down a little."}, 429
+    bad = fraud_check(uid, text)
+    if bad:
+        return {"error": bad}, 400
     owner = q("select uid from hg_posts where id=?", (pid,), one=True)
     if not owner or owner[0] in blocked_set(uid):
         return {"error": "You can't comment on this post."}, 403
@@ -731,6 +783,8 @@ def friend():
     if act == "request":
         if blocked:
             return {"error": "You can't add this person."}, 403
+        if not friend_rate_ok(uid):
+            return {"error": "That's a lot of friend requests today. Try again tomorrow."}, 429
         theirs = q("select status from hg_friends where a=? and b=?", (to, uid), one=True)
         if theirs and theirs[0] == "pending_out":  # they already asked me -> become friends
             act = "accept"
@@ -783,7 +837,7 @@ def page():
 
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Campus Connect</title><link rel="icon" href="/logo.jpg"><link rel="apple-touch-icon" href="/logo.jpg"><link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<title>SUMAS Campus Connect</title><link rel="icon" href="/logo.jpg"><link rel="apple-touch-icon" href="/logo.jpg"><link rel="manifest" href="/manifest.webmanifest"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#1877f2">
 <style>
 *{box-sizing:border-box}html,body{height:100%;margin:0}
@@ -844,12 +898,12 @@ h2{font-size:20px;margin:4px 0 10px}h4{margin:10px 0 4px;color:#65676b;font-size
 #auth .card>*{margin-bottom:10px}.rules{font-size:13px;color:#65676b;text-align:center;max-width:380px}
 .nt{display:flex;gap:10px;align-items:center;padding:8px;border-radius:8px;cursor:pointer}.nt.new{background:#e7f3ff}.nt small{color:#1877f2;display:block}
 </style></head><body>
-<div id="auth"><img class="logo" src="/logo.jpg" alt="Campus Connect logo"><h1>campus connect</h1>
-<div class="tag">Connect with SUMAS students and friends. Unofficial, made by students.</div>
+<div id="auth"><img class="logo" src="/logo.jpg" alt="SUMAS Campus Connect logo"><h1>sumas campus connect</h1>
+<div class="tag">Connect with SUMAS students and friends.<br><small>Unofficial, made by students. Not run by the university.</small></div>
 <div class="card" id="authcard"></div>
-<div class="rules">Free and unofficial fan-made site. Be kind, no scams, and never share passwords or your home address. 13+ only.</div></div>
+<div class="rules">Free and unofficial fan-made site. Stay safe: no one here will ever need your PIN, OTP, BVN or money. Admission or result \"deals\" are scams, report them. 13+ only.</div></div>
 <div class="top"><div class="bar"><div class="brand"><img src="/logo.jpg" alt="">connect</div>
-<div class="sbox">&#x1F50D;<input id="sq" placeholder="Search Campus Connect"></div></div>
+<div class="sbox">&#x1F50D;<input id="sq" placeholder="Search SUMAS Connect"></div></div>
 <div class="tabs"><button class="on" data-v="feed">&#x1F3E0;</button><button data-v="friends">&#x1F465;<span id="nbf"></span></button>
 <button data-v="chat">&#x1F4AC;</button><button data-v="notifs">&#x1F514;<span id="nbn"></span></button><button data-v="me">&#x2630;</button></div></div>
 <main>
@@ -917,7 +971,7 @@ const authStep1=showLogin;
 function logout(){if(me)fetch("/hg/api/logout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key:me.key})});me=null;localStorage.removeItem("tg_me");location.reload();}
 function quickJoin(msg){$("authcard").innerHTML=(msg?'<div style="color:#c4122f;font-size:14px">'+esc(msg)+'</div>':'')+
  '<div style="font-size:14px;color:#65676b;text-align:center">Preview: email sign-in is coming soon. For now just pick a name. This account lives on this phone only.</div>'+
- '<input class="f" id="qn" maxlength="20" placeholder="Your name (shown to others)"><button class="btn g w" id="qb">Join Campus Connect</button>';
+ '<input class="f" id="qn" maxlength="20" placeholder="Your name (shown to others)"><button class="btn g w" id="qb">Join SUMAS Campus Connect</button>';
  $("qb").onclick=async()=>{$("qb").disabled=true;try{me=await api("quickjoin",{nick:$("qn").value,dev:DEV});localStorage.setItem("tg_me",JSON.stringify(me));$("auth").style.display="none";start();}catch(e){quickJoin(e.message);}};
  $("qn").onkeydown=e=>{if(e.key==="Enter")$("qb").click();};}
 if(me)$("auth").style.display="none";else api("mode").then(j=>j.email?authStep1():quickJoin()).catch(()=>authStep1());
@@ -1006,7 +1060,7 @@ function openRoom(r,name){room=r;roomName=name;last=0;clearTimeout(timer);
   :'<button class="btn s" id="hb">\u2190</button><b style="flex:1">'+esc(name)+'</b><small style="color:#65676b">\u{1F512} Private</small>';
  if($("hb"))$("hb").onclick=()=>{room="hangout";roomName="Hangout";openRoom("hangout","Hangout");};
  if($("dms"))$("dms").onclick=()=>show("friends");
- $("chatlog").innerHTML=r==="hangout"?'<div class="sys">Be kind and keep personal info private.</div>':'<div class="sys">Only you and '+esc(name)+' can see this chat.</div>';poll();}
+ $("chatlog").innerHTML=r==="hangout"?'<div class="sys">Be kind and keep personal info private.</div>':'<div class="sys">Only you and '+esc(name)+' can see this chat.</div><div class="sys" style="background:#fff4e5;color:#8a5300;border-radius:8px;padding:8px">\u26A0\uFE0F Never send money, PINs, OTPs or BVN. Admission, result or job offers here are scams.</div>';poll();}
 async function poll(){if(view!=="chat")return;const log=$("chatlog"),main=document.querySelector("main");
  try{const j=await api("msgs",{room,after:last});const near=main.scrollHeight-main.scrollTop-main.clientHeight<120;let mine=false;
   for(const m of j.msgs){last=Math.max(last,m.id);if(blocked.includes(m.uid))continue;mine=m.uid===me.uid;const d=document.createElement("div");d.className="m"+(mine?" me":"");
@@ -1047,7 +1101,7 @@ function menuView(){const box=$("v-me");
  '<div class="card"><div class="row"><div class="nm">Your friend code<small>'+me.uid+'</small></div></div>'+
  (blocked.length?'<div class="row"><div class="nm">Blocked people<small>'+blocked.length+' blocked</small></div><button class="btn s" id="ub">Unblock all</button></div>':'')+
  '<div class="row"><div class="nm">Rules<small>Be kind. No scams, bullying or sharing private info. Report anything bad.</small></div></div>'+
- '<button class="btn w" id="lo">Log out</button></div><div style="text-align:center;color:#65676b;font-size:12px;padding:10px">Campus Connect \u00B7 free, unofficial student-made site, not run by SUMAS</div>';
+ '<button class="btn w" id="lo">Log out</button></div><div style="text-align:center;color:#65676b;font-size:12px;padding:10px">SUMAS Campus Connect \u00B7 free, unofficial student-made site, not run by SUMAS</div>';
  $("mp").onclick=()=>openProfile(me.uid);$("lo").onclick=logout;
  if($("ub"))$("ub").onclick=async()=>{for(const u of blocked)await api("friend",{action:"unblock",to:u});await badges();menuView();};}
 if(me)start();
