@@ -1,7 +1,9 @@
 """Tygars Bot: bet code converter helpers + /betcheck (reachability test for bookie APIs).
 Free for users. 18+ only. No secrets are read or returned here."""
 import re
+import json
 import time
+import threading
 import requests
 from flask import Blueprint, request
 
@@ -163,14 +165,19 @@ def waf_cookies(domain, force=False):
                 ctx = b.new_context(user_agent=UA, locale="en-US")
                 ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "media", "font", "websocket") else r.continue_())
                 pg = ctx.new_page()
-                pg.goto(f"https://www.{domain}/ng/", wait_until="domcontentloaded", timeout=45000)
+                resp = pg.goto(f"https://www.{domain}/ng/", wait_until="domcontentloaded", timeout=45000)
                 ck = {}
-                for _ in range(25):
+                for _ in range(20):
                     ck = {c["name"]: c["value"] for c in ctx.cookies()}
                     if "aws-waf-token" in ck:
                         break
                     pg.wait_for_timeout(1000)
-                _waf[domain] = {"cookies": ck, "ts": time.time()}
+                diag = {"goto_status": resp.status if resp else None, "title": (pg.title() or "")[:80]}
+                try:   # can the page itself call the API (same origin, after the check)?
+                    diag["in_page"] = pg.evaluate("fetch('/api/ng/orders/share/VESTC6').then(r => r.status + ' ' + r.headers.get('content-type'))")
+                except Exception as e:
+                    diag["in_page"] = str(e)[:120]
+                _waf[domain] = {"cookies": ck, "ts": time.time(), "diag": diag}
                 return ck
             finally:
                 b.close()
@@ -181,21 +188,85 @@ def waf_cookies(domain, force=False):
         lock.release()
 
 
+class WafBlocked(Exception):
+    pass
+
+
+_tl = threading.local()
+
+
+def _page_http(pg, method, url, body):
+    path = re.sub(r"^https?://[^/]+", "", url)
+    js = """async ([m, p, b]) => { const r = await fetch(p, {method: m, headers: b === null ? {} : {'Content-Type': 'application/json'},
+            body: b === null ? undefined : b}); return [r.status, await r.text()]; }"""
+    st, txt = pg.evaluate(js, [method, path, None if body is None else json.dumps(body)])
+    if st == 202 and not txt.strip():
+        raise WafBlocked(f"{_domain(url)} is blocking our server right now")
+    return json.loads(txt)
+
+
+class page_session:
+    """Open a headless browser on a bookie site and send its API calls from inside the page (passes the bot check)."""
+    def __init__(self, domain):
+        self.domain = domain
+
+    def __enter__(self):
+        from playwright.sync_api import sync_playwright
+        self.own = not getattr(_tl, "held", False)
+        if self.own:
+            if not _deps["lock"].acquire(timeout=120):
+                raise WafBlocked("browser busy")
+            _tl.held = True
+        try:
+            _deps["ensure"]()
+            self.pw = sync_playwright().start()
+            self.b = _deps["launch"](self.pw)
+            ctx = self.b.new_context(user_agent=UA, locale="en-US")
+            ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "media", "font", "websocket") else r.continue_())
+            pg = ctx.new_page()
+            pg.goto(f"https://www.{self.domain}/ng/", wait_until="domcontentloaded", timeout=45000)
+            pg.wait_for_timeout(3000)
+            pages = getattr(_tl, "pages", {})
+            pages[self.domain] = pg
+            _tl.pages = pages
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *a):
+        try:
+            getattr(_tl, "pages", {}).pop(self.domain, None)
+            if getattr(self, "b", None):
+                self.b.close()
+            if getattr(self, "pw", None):
+                self.pw.stop()
+        finally:
+            if self.own:
+                _tl.held = False
+                _deps["lock"].release()
+
+
 def http(method, url, body=None):
-    """JSON request to a bookie. Retries once through the headless browser's cookies when the WAF challenges us."""
+    """JSON request to a bookie. SportyBet/Football.com sit behind a bot check: retry with browser cookies,
+    or send from inside a headless page when a page_session is open."""
     d = _domain(url)
+    pg = getattr(_tl, "pages", {}).get(d)
+    if pg:
+        return _page_http(pg, method, url, body)
     needs_waf = d in ("sportybet.com", "football.com")
     for attempt in range(2):
         ck = waf_cookies(d, force=attempt == 1) if needs_waf and (attempt == 1 or d in _waf) else {}
         h = hdrs(url, {"Content-Type": "application/json"} if body is not None else None)
         r = requests.request(method, url, json=body, headers=h, cookies=ck, timeout=25)
-        if r.status_code == 202 and not r.text.strip() and needs_waf and attempt == 0:
-            continue
+        if r.status_code == 202 and not r.text.strip() and needs_waf:
+            if attempt == 0:
+                continue
+            raise WafBlocked(f"{d} is blocking our server right now")
         try:
             return r.json()
         except Exception:
             raise RuntimeError(f"{d} answered {r.status_code} without data")
-    raise RuntimeError(f"{d} is blocking our server right now")
 
 
 # ---------- load / create per bookie ----------
@@ -306,6 +377,17 @@ def convert(code, src, dst):
             "matched": ok, "unmatched": unmatched, "total": len(picks)}
 
 
+def convert_in_browser(code, src, dst):
+    doms = sorted({_domain(SHARE[b]) for b in (src, dst)} & {"sportybet.com", "football.com"})
+    if not doms:
+        return convert(code, src, dst)
+    with page_session(doms[0]):
+        if len(doms) > 1:
+            with page_session(doms[1]):
+                return convert(code, src, dst)
+        return convert(code, src, dst)
+
+
 def format_result(r, code, src, dst):
     lines = [f"\U0001F3AB {label(src)} {code.upper()} \u2192 {label(dst)}"]
     if r["code"]:
@@ -380,7 +462,10 @@ def run(chat, code, src, dst, send):
         return send(chat, f"You've used today's {DAILY_LIMIT} free conversions. Come back tomorrow. " + RESP)
     send(chat, f"\u23F3 Converting {code.upper()} from {label(src)} to {label(dst)}... this can take up to a minute.")
     try:
-        r = convert(code, src, dst)
+        try:
+            r = convert(code, src, dst)
+        except WafBlocked:
+            r = convert_in_browser(code, src, dst)
         send(chat, format_result(r, code, src, dst))
     except BetError as e:
         send(chat, f"\u26A0 {label(src)} said: {e}\nCheck the code and the bookie, then try again.")
@@ -407,34 +492,72 @@ def convert_cmd(chat, text, send):
     run(chat, parts[1], src, dst, send)
 
 
+_jobs = {}
+
+
+def _job(key, code, src, dst):
+    t = time.time()
+    try:
+        try:
+            r = convert(code, src, dst)
+            how = "direct"
+        except WafBlocked:
+            r = convert_in_browser(code, src, dst)
+            how = "browser"
+        _jobs[key] = {"status": "done", "ok": True, "how": how, "secs": round(time.time() - t, 1), "text": format_result(r, code, src, dst)}
+    except BaseException as e:
+        _jobs[key] = {"status": "done", "ok": False, "secs": round(time.time() - t, 1), "error": f"{type(e).__name__}: {str(e)[:300]}"}
+
+
 @bp.get("/betcheck/convert")
 def betcheck_convert():
-    """Test a conversion without Telegram (no code is saved)."""
-    now = time.time()
-    _probe_hits[:] = [x for x in _probe_hits if now - x < 60] + [now]
-    if len(_probe_hits) > 40:
-        return {"error": "slow down"}, 429
+    """Test a conversion without Telegram. Non-blocking: call again with the same args to read the result."""
     src, dst, code = norm_bookie(request.args.get("from")), norm_bookie(request.args.get("to")), request.args.get("code", "")
     if not src or not dst or src not in SHARE or dst not in SHARE:
         return {"error": "bad bookie"}, 400
+    key = (code.upper(), src, dst)
+    cur = _jobs.get(key)
+    if cur and not request.args.get("new"):
+        return cur
+    if cur and cur.get("status") == "running":
+        return cur
+    now = time.time()
+    _probe_hits[:] = [x for x in _probe_hits if now - x < 60] + [now]
+    if len(_probe_hits) > 40 or len(_jobs) > 200:
+        return {"error": "slow down"}, 429
+    _jobs[key] = {"status": "running"}
+    threading.Thread(target=_job, args=(key, code, src, dst), daemon=True).start()
+    return {"status": "started, check again in a minute"}
+
+
+_wafdiag = {}
+
+
+def _waf_diag(d):
+    t = time.time()
+    _wafdiag[d] = {"status": "running"}
+    out = {}
     try:
-        r = convert(code, src, dst)
-        return {"ok": True, "text": format_result(r, code, src, dst)}
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+        ck = waf_cookies(d, force=True)
+        out.update(got_token="aws-waf-token" in ck, cookie_names=sorted(ck)[:20], secs=round(time.time() - t, 1),
+                   page=_waf.get(d, {}).get("diag"))
+        r = requests.get(f"https://www.{d}/api/ng/orders/share/VESTC6", headers=hdrs(f"https://www.{d}/"), cookies=ck, timeout=20)
+        out["share_status"], out["share_preview"] = r.status_code, r.text[:120]
+    except BaseException as e:
+        out["error"] = repr(e)[:300]
+    out["status"] = "done"
+    _wafdiag[d] = out
 
 
 @bp.get("/betcheck/waf")
 def betcheck_waf():
+    """Non-blocking: first call starts the headless-browser bot-check test, later calls return its result."""
     d = request.args.get("d", "sportybet.com")
     if d not in ("sportybet.com", "football.com"):
         return {"error": "bad domain"}, 400
-    t = time.time()
-    ck = waf_cookies(d, force=True)
-    out = {"got_token": "aws-waf-token" in ck, "cookie_names": sorted(ck)[:20], "secs": round(time.time() - t, 1)}
-    try:
-        r = requests.get(f"https://www.{d}/api/ng/orders/share/VESTC6", headers=hdrs(f"https://www.{d}/"), cookies=ck, timeout=20)
-        out["share_status"], out["share_preview"] = r.status_code, r.text[:120]
-    except Exception as e:
-        out["share_error"] = str(e)[:200]
-    return out
+    cur = _wafdiag.get(d)
+    if request.args.get("new") or not cur:
+        if not cur or cur.get("status") != "running":
+            threading.Thread(target=_waf_diag, args=(d,), daemon=True).start()
+        return {"status": "started, check again in a minute"}
+    return cur
