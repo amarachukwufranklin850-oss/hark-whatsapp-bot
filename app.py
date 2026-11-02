@@ -371,6 +371,9 @@ def telegram_incoming():
     if TG_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TG_SECRET:
         return "forbidden", 403
     upd = request.get_json(silent=True) or {}
+    if upd.get("callback_query"):
+        threading.Thread(target=telegram_callback, args=(upd["callback_query"],), daemon=True).start()
+        return "ok", 200
     msg = upd.get("message") or {}
     text = msg.get("text")
     chat = (msg.get("chat") or {}).get("id")
@@ -395,7 +398,8 @@ VISION_MODEL = "qwen/qwen3.8-27b"
 
 
 def telegram_voice_reply(chat, voice):
-    """Voice note -> Groq Whisper transcript -> normal answer."""
+    """Voice note -> Groq Whisper transcript -> normal answer (or transcript only in speech-to-text mode)."""
+    only_text = take_mode(chat) == "stt"
     try:
         requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
                       json={"chat_id": chat, "action": "typing"}, timeout=5)
@@ -417,6 +421,8 @@ def telegram_voice_reply(chat, voice):
             said = (r.json().get("text") or "").strip()
             if not said:
                 reply = "I couldn't hear anything in that voice note. Try again a bit louder."
+            elif only_text:
+                reply = "\U0001F4DD Transcript:\n\n" + said
             else:
                 reply = "\U0001F3A4 \"" + said[:300] + "\"\n\n" + ask_ai(f"tg:{chat}", said)
     except Exception as e:
@@ -750,6 +756,30 @@ def send_voice(chat, text, caption=""):
 
 
 def telegram_reply(chat, text, reply_to_text=""):
+    low0 = text.strip().lower()
+    mode = take_mode(chat) if not text.startswith("/") else (pending_mode.pop(chat, None) and None)
+    if mode == "image":
+        return telegram_image_reply(chat, "/image " + text)
+    if mode == "video":
+        return telegram_video_reply(chat, "/video " + text)
+    if mode == "tts":
+        return telegram_reply(chat, "/speak " + text)
+    if mode == "pdf":
+        return telegram_pdf_reply(chat, "Make a PDF about: " + text)
+    if mode == "remind":
+        return reminder_cmd(chat, "remind me " + text)
+    if mode == "todo":
+        return todo_cmd(chat, "/todo " + text)
+    if mode == "stt":
+        return tg_send(chat, "Please send a voice note and I'll write out what was said.")
+    if low0 in ("/menu", "menu", "/help"):
+        return tg_send(chat, "🐯 Tygars Bot menu. Tap what you need:", main_menu())
+    if low0.startswith("/reminders") or low0 in ("my reminders", "show my reminders"):
+        return list_reminders(chat)
+    if low0.startswith("/remind") or re.match(r"^\s*(remind me|set (a )?reminder)\b", text, re.I):
+        return reminder_cmd(chat, text)
+    if low0.startswith("/todo") or re.match(r"^\s*(add to (my )?(to-?do|todo)|todo:)", text, re.I) or low0 in ("my todo list", "my to-do list", "show my todo"):
+        return todo_cmd(chat, text)
     low = text.strip().lower()
     if low.startswith("/image") or (IMG_ASK.search(text) and not text.startswith("/")):
         return telegram_image_reply(chat, text)
@@ -776,7 +806,7 @@ def telegram_reply(chat, text, reply_to_text=""):
     if text.strip() == "/browse":
         reply = ""
     elif text.strip() == "/start":
-        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), ask me to make a PDF, /image to find a photo, /video for a short photo clip, or /speak to hear text read aloud: school work, tech, "
+        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), set reminders, keep a to-do list, find photos, make PDFs and more. Tap a button below or send /menu anytime. Ask me about school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
         try:
@@ -786,9 +816,10 @@ def telegram_reply(chat, text, reply_to_text=""):
             pass
         reply = ask_ai(f"tg:{chat}", text)
     payload = {"chat_id": chat, "text": reply}
-    if text.strip() in ("/start", "/browse"):
-        if text.strip() == "/browse":
-            payload["text"] = "Tap below to browse the web inside Telegram \U0001F310"
+    if text.strip() == "/start":
+        payload["reply_markup"] = main_menu()
+    elif text.strip() == "/browse":
+        payload["text"] = "Tap below to browse the web inside Telegram \U0001F310"
         payload["reply_markup"] = {"inline_keyboard": [[
             {"text": "\U0001F4AC Live chat", "web_app": {"url": BROWSE_URL.replace("/browse", "/chat")}},
             {"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}]]}
@@ -1000,6 +1031,223 @@ def tts_api():
 @app.get("/browse")
 def browse_page():
     return Response(BROWSE_HTML, mimetype="text/html")
+
+
+# ---------- daily helper: reminders, to-do list, menu buttons ----------
+WAT = 3600            # users are in West Africa (UTC+1)
+pending_mode = {}     # chat -> what the next message is for (set by a menu button)
+X_HANDLES = [("@hackmacos", "https://x.com/hackmacos")]
+
+
+def tq(sql, args=(), fetch=False):
+    """Small DB helper for reminders/to-dos (Neon on Render, SQLite locally)."""
+    from hangout import q
+    if not getattr(tq, "ready", False):
+        for s in ["create table if not exists bot_reminders (id bigserial primary key, chat bigint, body text, due double precision, rep text default '')",
+                  "create table if not exists bot_todos (id bigserial primary key, chat bigint, body text, done int default 0, ts double precision)"]:
+            if not os.environ.get("DATABASE_URL"):
+                s = s.replace("bigserial primary key", "integer primary key autoincrement").replace("double precision", "real").replace("bigint", "integer")
+            q(s)
+        tq.ready = True
+    return q(sql, args, fetch=fetch)
+
+
+def wat_now():
+    import datetime
+    return datetime.datetime.utcfromtimestamp(time.time() + WAT)
+
+
+def parse_reminder(text):
+    """'remind me every day at 7am to read' -> (due_epoch, repeat, what) or None."""
+    import datetime
+    t = re.sub(r"^\s*(/remind|remind me|reminder|set (a )?reminder)\s*(?:(?:to|that|about)\b)?\s*", "", text, flags=re.I).strip()
+    rep = ""
+    if re.search(r"\b(every ?day|daily|each day|every morning|every night|every evening)\b", t, re.I):
+        rep = "daily"
+    elif re.search(r"\b(weekdays|every weekday|monday to friday)\b", t, re.I):
+        rep = "weekdays"
+    m_wd = re.search(r"\bevery (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", t, re.I)
+    if m_wd:
+        rep = "weekly"
+    now = wat_now()
+    due = None
+    m = re.search(r"\bin (\d+)\s*(min|mins|minutes?|hours?|hrs?|h|days?)\b", t, re.I)
+    if m:
+        n, u = int(m.group(1)), m.group(2).lower()
+        due = now + datetime.timedelta(minutes=n if u.startswith("m") else 0, hours=n if u.startswith("h") else 0,
+                                       days=n if u.startswith("d") else 0)
+    else:
+        m = re.search(r"\b(?:at\s*)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b|\bat\s*(\d{1,2})[:.](\d{2})\b|\bat\s*(\d{1,2})\b", t, re.I)
+        hh = mm = None
+        if m:
+            if m.group(1):
+                hh, mm = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0), int(m.group(2) or 0)
+            elif m.group(4):
+                hh, mm = int(m.group(4)), int(m.group(5))
+            else:
+                hh, mm = int(m.group(6)), 0
+        elif re.search(r"\bmorning\b", t, re.I):
+            hh, mm = 7, 0
+        elif re.search(r"\b(evening|night)\b", t, re.I):
+            hh, mm = 20, 0
+        elif re.search(r"\bnoon|afternoon\b", t, re.I):
+            hh, mm = 13, 0
+        if hh is None or hh > 23 or mm > 59:
+            return None
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if re.search(r"\btomorrow\b", t, re.I):
+            due += datetime.timedelta(days=1)
+        if m_wd:
+            want = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].index(m_wd.group(1).lower())
+            due += datetime.timedelta(days=(want - due.weekday()) % 7)
+        while due <= now or (rep == "weekdays" and due.weekday() > 4):
+            due += datetime.timedelta(days=1 if rep != "weekly" else 7)
+    what = re.sub(r"\b(every ?day|daily|each day|every (morning|night|evening|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|weekdays|"
+                  r"monday to friday|tomorrow|today|in \d+\s*\w+|at\s*\d{1,2}([:.]\d{2})?\s*(am|pm)?|\d{1,2}([:.]\d{2})?\s*(am|pm)|morning|evening|night|noon|afternoon)\b",
+                  "", t, flags=re.I)
+    what = re.sub(r"^\s*(to|that|about|,)\s+", "", re.sub(r"\s{2,}", " ", what)).strip(" ,.") or "your reminder"
+    epoch = (due - datetime.datetime(1970, 1, 1)).total_seconds() - WAT
+    return epoch, rep, what[:300]
+
+
+def fmt_due(epoch, rep):
+    import datetime
+    d = datetime.datetime.utcfromtimestamp(epoch + WAT)
+    when = d.strftime("%-I:%M %p")
+    if rep == "daily":
+        return f"every day at {when}"
+    if rep == "weekdays":
+        return f"every weekday at {when}"
+    if rep == "weekly":
+        return f"every {d.strftime('%A')} at {when}"
+    day = "today" if d.date() == wat_now().date() else d.strftime("%a %-d %b")
+    return f"{day} at {when}"
+
+
+def tg_send(chat, text, markup=None):
+    p = {"chat_id": chat, "text": text[:4000]}
+    if markup:
+        p["reply_markup"] = markup
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", json=p, timeout=20)
+
+
+def reminder_cmd(chat, text):
+    p = parse_reminder(text)
+    if not p:
+        return tg_send(chat, "Tell me when, e.g. \"remind me every day at 7am to read\", \"remind me in 30 minutes to call mum\" "
+                             "or \"remind me tomorrow at 6pm to submit my assignment\". Times are Nigerian time (WAT).")
+    n = tq("select count(*) from bot_reminders where chat=?", (chat,), fetch=True)[0][0]
+    if n >= 20:
+        return tg_send(chat, "You already have 20 reminders. Delete some with /reminders first.")
+    tq("insert into bot_reminders (chat, body, due, rep) values (?, ?, ?, ?)", (chat, p[2], p[0], p[1]))
+    tg_send(chat, f"\u23F0 Got it. I'll remind you to {p[2]} {fmt_due(p[0], p[1])}.\nSee or delete them with /reminders.")
+
+
+def list_reminders(chat):
+    rows = tq("select id, body, due, rep from bot_reminders where chat=? order by due", (chat,), fetch=True)
+    if not rows:
+        return tg_send(chat, "You have no reminders. Try: remind me every day at 7am to read.")
+    lines = [f"{i+1}. {r[1]} ({fmt_due(r[2], r[3])})" for i, r in enumerate(rows)]
+    kb = [[{"text": f"\U0001F5D1 Delete {i+1}", "callback_data": f"rmdel:{r[0]}"}] for i, r in enumerate(rows[:10])]
+    tg_send(chat, "\u23F0 Your reminders:\n" + "\n".join(lines), {"inline_keyboard": kb})
+
+
+def todo_cmd(chat, text):
+    item = re.sub(r"^\s*(/todo|/add|add to (my )?(to-?do|todo)( list)?:?|todo:?)\s*", "", text, flags=re.I).strip()
+    if item and item.lower() not in ("list", "show"):
+        n = tq("select count(*) from bot_todos where chat=? and done=0", (chat,), fetch=True)[0][0]
+        if n >= 50:
+            return tg_send(chat, "Your list is full (50). Tick some off first.")
+        tq("insert into bot_todos (chat, body, ts) values (?, ?, ?)", (chat, item[:200], time.time()))
+    rows = tq("select id, body from bot_todos where chat=? and done=0 order by id", (chat,), fetch=True)
+    if not rows:
+        return tg_send(chat, "Your to-do list is empty. Add one with: /todo buy data")
+    head = "\u2705 Added. " if item and item.lower() not in ("list", "show") else ""
+    kb = [[{"text": f"\u2714 {r[1][:30]}", "callback_data": f"tddone:{r[0]}"}] for r in rows[:15]]
+    tg_send(chat, head + "\U0001F4DD Your to-do list (tap to tick off):\n" + "\n".join(f"{i+1}. {r[1]}" for i, r in enumerate(rows)),
+            {"inline_keyboard": kb})
+
+
+def main_menu():
+    rows = [[{"text": "\U0001F5BC Image search", "callback_data": "m:image"}, {"text": "\U0001F3AC Photo video", "callback_data": "m:video"}],
+            [{"text": "\U0001F50A Text to speech", "callback_data": "m:tts"}, {"text": "\U0001F3A4 Speech to text", "callback_data": "m:stt"}],
+            [{"text": "\U0001F4C4 Make a PDF", "callback_data": "m:pdf"}, {"text": "\u23F0 Reminders", "callback_data": "m:remind"}],
+            [{"text": "\U0001F4DD To-do list", "callback_data": "m:todo"}, {"text": "\U0001F4AC Live chat", "web_app": {"url": BROWSE_URL.replace("/browse", "/chat")}}],
+            [{"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}]]
+    rows += [[{"text": f"\U0001D54F Follow {h} on X", "url": u}] for h, u in X_HANDLES]
+    return {"inline_keyboard": rows}
+
+
+MENU_PROMPTS = {
+    "image": "\U0001F5BC Send me what you want a photo of (e.g. Lagos skyline).",
+    "video": "\U0001F3AC Send me a topic and I'll make a short photo video (e.g. Enugu city).",
+    "tts": "\U0001F50A Send me the text and I'll read it aloud.",
+    "stt": "\U0001F3A4 Send me a voice note and I'll write out what was said.",
+    "pdf": "\U0001F4C4 What should the PDF be about?",
+    "remind": "\u23F0 What should I remind you about, and when? e.g. every day at 7am to read",
+    "todo": "\U0001F4DD Send the task to add to your to-do list.",
+}
+
+
+def telegram_callback(cb):
+    chat = ((cb.get("message") or {}).get("chat") or {}).get("id")
+    data = cb.get("data") or ""
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb.get("id")}, timeout=10)
+    if not chat:
+        return
+    try:
+        if data.startswith("m:"):
+            k = data[2:]
+            if k == "remind" and tq("select count(*) from bot_reminders where chat=?", (chat,), fetch=True)[0][0]:
+                list_reminders(chat)
+            if k == "todo" and tq("select count(*) from bot_todos where chat=? and done=0", (chat,), fetch=True)[0][0]:
+                todo_cmd(chat, "/todo list")
+            pending_mode[chat] = (k, time.time())
+            tg_send(chat, MENU_PROMPTS.get(k, "Send it over."))
+        elif data.startswith("rmdel:"):
+            tq("delete from bot_reminders where id=? and chat=?", (int(data[6:]), chat))
+            tg_send(chat, "\U0001F5D1 Reminder deleted.")
+            list_reminders(chat)
+        elif data.startswith("tddone:"):
+            tq("update bot_todos set done=1 where id=? and chat=?", (int(data[7:]), chat))
+            tg_send(chat, "\u2714 Ticked off. Nice work!")
+            todo_cmd(chat, "/todo list")
+    except Exception as e:
+        print("callback error:", e)
+        tg_send(chat, "Sorry, something went wrong. Please try again.")
+
+
+def take_mode(chat):
+    m = pending_mode.pop(chat, None)
+    return m[0] if m and time.time() - m[1] < 900 else None
+
+
+def reminder_loop():
+    import datetime
+    time.sleep(20)
+    while True:
+        try:
+            now = time.time()
+            for rid, chat, body, due, rep in tq("select id, chat, body, due, rep from bot_reminders where due<=?", (now,), fetch=True) or []:
+                if rep:
+                    nxt = due
+                    while nxt <= now:
+                        nxt += 7 * 86400 if rep == "weekly" else 86400
+                        if rep == "weekdays":
+                            while datetime.datetime.utcfromtimestamp(nxt + WAT).weekday() > 4:
+                                nxt += 86400
+                    claimed = tq("update bot_reminders set due=? where id=? and due=? returning id", (nxt, rid, due), fetch=True)
+                else:
+                    claimed = tq("delete from bot_reminders where id=? and due=? returning id", (rid, due), fetch=True)
+                if claimed and now - due < 6 * 3600:
+                    tg_send(chat, f"\u23F0 Reminder: {body}")
+        except Exception as e:
+            print("reminder loop error:", e)
+        time.sleep(30)
+
+
+if TG_TOKEN:
+    threading.Thread(target=reminder_loop, daemon=True).start()
 
 
 def keep_awake():
