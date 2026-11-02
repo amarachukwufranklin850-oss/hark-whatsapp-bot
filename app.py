@@ -1274,7 +1274,7 @@ def ensure_browser():
                        check=True, capture_output=True, timeout=300)
         _pw_ready[0] = True
     except Exception as e:
-        print("playwright install error:", getattr(e, "stderr", b"")[-500:] if hasattr(e, "stderr") else e)
+        print("playwright install error:", str(getattr(e, "stderr", None) or e)[-500:])
     return _pw_ready[0]
 
 
@@ -1401,24 +1401,39 @@ def microlink_shot(url):
 _webcheck = {}
 
 
+def _run_webcheck():
+    if not _pw_lock.acquire(blocking=False):
+        return
+    try:
+        _webcheck["status"] = "checking"
+        _webcheck["install"] = ensure_browser()
+        try:
+            r = shoot_page("https://example.com")
+            _webcheck["ok"] = bool(r.get("png"))
+        except Exception as e:
+            _webcheck["ok"] = False
+            _webcheck["error"] = str(e).splitlines()[0][:200]
+            m = re.search(r"error while loading shared libraries: (\S+)", str(e))
+            if m:
+                _webcheck["missing"] = m.group(1)
+    except BaseException as e:
+        _webcheck["ok"] = False
+        _webcheck["error"] = repr(e)[:200]
+    finally:
+        _webcheck["status"] = "done"
+        _pw_lock.release()
+
+
 @app.get("/webcheck")
 def webcheck():
-    """Tells whether the web viewer's browser works on this server (no page content returned)."""
-    if "ok" not in _webcheck and _pw_lock.acquire(blocking=False):
-        try:
-            _webcheck["install"] = ensure_browser()
-            try:
-                r = shoot_page("https://example.com")
-                _webcheck["ok"] = bool(r.get("png"))
-            except Exception as e:
-                _webcheck["ok"] = False
-                _webcheck["error"] = str(e).splitlines()[0][:200]
-                m = re.search(r"error while loading shared libraries: (\S+)", str(e))
-                if m:
-                    _webcheck["missing"] = m.group(1)
-        finally:
-            _pw_lock.release()
-    return _webcheck or {"status": "busy"}
+    """Tells whether the web viewer's browser works on this server (no page content returned). Never blocks."""
+    if not _webcheck:
+        threading.Thread(target=_run_webcheck, daemon=True).start()
+        return {"status": "started, check again in 1-2 minutes"}
+    return dict(_webcheck)
+
+
+threading.Thread(target=lambda: (time.sleep(20), _run_webcheck()), daemon=True).start()
 
 
 def telegram_open(chat, text, record=False, y=0, url=None):
