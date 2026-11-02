@@ -44,7 +44,7 @@ SYSTEM = (
 )
 
 TG_CREATOR = (" If asked who made or created you, say you were made by Amarachukwu Franklin from "
-              "Enugu State, a student at Enugu State University of Science and Technology (ESUT).")
+              "Enugu State, a student at the State University of Medical and Applied Sciences (SUMAS), Igbo-Eno.")
 
 history = {}   # last few messages per user (resets when the server restarts)
 seen = set()   # message ids already answered, so Meta retries are ignored
