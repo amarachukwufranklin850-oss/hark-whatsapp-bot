@@ -536,7 +536,7 @@ def telegram_pdf_reply(chat, text):
 IMG_ASK = re.compile(r"^\s*(please\s+)?(draw|paint|sketch|generate|create|make|design|show me)\b.{0,40}\b(image|picture|pic|photo|drawing|art|artwork|logo|poster|wallpaper|illustration)s?\b", re.I | re.S)
 VID_ASK = re.compile(r"^\s*(please\s+)?(generate|create|make|animate)\b.{0,40}\b(video|clip|animation)\b", re.I | re.S)
 MEDIA_BLOCK = re.compile(r"\b(nude|naked|nsfw|porn|sex|sexy|boobs|explicit|gore|beheading|child|kid|minor|underage|schoolgirl)\b", re.I)
-MEDIA_LIMITS = {"img": 15, "vid": 4}
+MEDIA_LIMITS = {"img": 30, "vid": 6}
 _media_use = {}
 
 
@@ -601,6 +601,43 @@ def remember(chat, user_text, note):
     except Exception as e:
         print("history error:", e)
 
+UA = {"User-Agent": "TygarsBot/1.0 (fan-made Telegram bot; contact harkbotofficial@gmail.com)"}
+
+
+def web_photos(query, n=1):
+    """Real photos from a quick web search (Wikimedia Commons, then Openverse). Returns [(bytes, title, page)]."""
+    found = []
+    try:
+        r = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=25, params={
+            "action": "query", "generator": "search", "gsrnamespace": 6, "gsrsearch": query,
+            "gsrlimit": 12, "prop": "imageinfo", "iiprop": "url|mime", "iiurlwidth": 1280, "format": "json"})
+        pages = sorted((r.json().get("query") or {}).get("pages", {}).values(), key=lambda p: p.get("index", 99))
+        for p in pages:
+            ii = (p.get("imageinfo") or [{}])[0]
+            if ii.get("mime") in ("image/jpeg", "image/png"):
+                found.append((ii.get("thumburl") or ii.get("url"), p["title"][5:].rsplit(".", 1)[0], ii.get("descriptionurl", "")))
+    except Exception as e:
+        print("commons error:", e)
+    if len(found) < n:
+        try:
+            r = requests.get("https://api.openverse.org/v1/images/", headers=UA, timeout=25,
+                             params={"q": query, "page_size": 10, "mature": "false"})
+            for x in r.json().get("results", []):
+                found.append((x["url"], x.get("title") or query, x.get("foreign_landing_url", "")))
+        except Exception as e:
+            print("openverse error:", e)
+    out = []
+    for url, title, page in found:
+        if len(out) >= n:
+            break
+        try:
+            g = requests.get(url, headers=UA, timeout=30)
+            if g.status_code == 200 and g.headers.get("content-type", "").startswith("image/") and len(g.content) < 9_000_000:
+                out.append((g.content, title, page))
+        except Exception as e:
+            print("photo fetch error:", e)
+    return out
+
 
 def telegram_image_reply(chat, text):
     prompt = media_prompt(text, "/image")
@@ -611,16 +648,18 @@ def telegram_image_reply(chat, text):
     if not media_quota(chat, "img"):
         return tg_text(chat, f"You've hit today's limit of {MEDIA_LIMITS['img']} pictures. Try again tomorrow.")
     requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction", json={"chat_id": chat, "action": "upload_photo"}, timeout=5)
-    img = ai_image(prompt)
-    if not img:
-        return tg_text(chat, "Sorry, the picture maker is busy right now. Please try again in a minute.")
+    pics = web_photos(prompt, 1)
+    if not pics:
+        return tg_text(chat, f"I couldn't find a photo of \"{prompt}\" online. Try different words.")
+    img, title, page = pics[0]
+    cap = f"\U0001F4F7 {title}" + (f"\nSource: {page}" if page else "")
     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
-                      data={"chat_id": chat, "caption": f"\U0001F3A8 {prompt}"[:1000]},
-                      files={"photo": ("tygars.jpg", img, "image/jpeg")}, timeout=60)
+                      data={"chat_id": chat, "caption": cap[:1000]},
+                      files={"photo": ("photo.jpg", img, "image/jpeg")}, timeout=60)
     if r.status_code >= 300:
         print("sendPhoto error:", r.status_code, r.text)
-        return tg_text(chat, "Sorry, I couldn't send the picture.")
-    remember(chat, text, f"[sent an AI picture: {prompt}]")
+        return tg_text(chat, "Sorry, I couldn't send the photo.")
+    remember(chat, text, f"[sent a web photo: {title}]")
 
 
 def make_clip(frames, secs=3):
@@ -635,7 +674,7 @@ def make_clip(frames, secs=3):
         open(p, "wb").write(f)
         ins += ["-i", p]
         z = "zoom+0.0012" if i % 2 == 0 else "if(eq(on,0),1.15,zoom-0.0012)"
-        parts.append(f"[{i}:v]scale=1024:1024,zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        parts.append(f"[{i}:v]scale=1024:1024:force_original_aspect_ratio=increase,crop=1024:1024,zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
                      f"d={secs*fps}:s=640x640:fps={fps},setsar=1,format=yuv420p[v{i}]")
     chain, last, off = "", "v0", secs - 0.6
     for i in range(1, n):
@@ -658,17 +697,11 @@ def telegram_video_reply(chat, text):
         return tg_text(chat, "Sorry, I can't make that kind of video. Try something else.")
     if not media_quota(chat, "vid"):
         return tg_text(chat, f"You've hit today's limit of {MEDIA_LIMITS['vid']} videos. Try again tomorrow.")
-    tg_text(chat, "\U0001F3AC Making your video, this takes 2 to 3 minutes...")
+    tg_text(chat, "\U0001F3AC Making your video, this takes about a minute...")
     requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction", json={"chat_id": chat, "action": "upload_video"}, timeout=5)
-    seed = int(time.time()) % 100000
-    shots = ["wide establishing shot", "dramatic close-up", "cinematic final shot"]
-    frames = []
-    for i, s in enumerate(shots):
-        f = ai_image(f"{prompt}, {s}, cinematic, consistent style", seed=seed + i, size=1024)
-        if f:
-            frames.append(f)
+    frames = [p[0] for p in web_photos(prompt, 4)]
     if len(frames) < 2:
-        return tg_text(chat, "Sorry, the video maker is busy right now. Please try again in a minute.")
+        return tg_text(chat, f"I couldn't find enough photos of \"{prompt}\" online for a video. Try different words.")
     try:
         vid = make_clip(frames, secs=3)
     except Exception as e:
@@ -680,7 +713,7 @@ def telegram_video_reply(chat, text):
     if r.status_code >= 300:
         print("sendVideo error:", r.status_code, r.text)
         return tg_text(chat, "Sorry, I couldn't send the video.")
-    remember(chat, text, f"[sent an AI video clip: {prompt}]")
+    remember(chat, text, f"[sent a photo slideshow video: {prompt}]")
 
 
 TTS_VOICE = "en-NG-AbeoNeural"   # Nigerian English voice (Microsoft Edge TTS, free)
@@ -743,7 +776,7 @@ def telegram_reply(chat, text, reply_to_text=""):
     if text.strip() == "/browse":
         reply = ""
     elif text.strip() == "/start":
-        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), ask me to make a PDF, /image to create a picture, /video for a short clip, or /speak to hear text read aloud: school work, tech, "
+        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), ask me to make a PDF, /image to find a photo, /video for a short photo clip, or /speak to hear text read aloud: school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
         try:
