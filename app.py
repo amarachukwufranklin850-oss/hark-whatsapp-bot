@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import html
 import re
 import base64
 import xml.etree.ElementTree as ET
@@ -142,7 +143,43 @@ TOOLS = [{
                        "properties": {"query": {"type": "string"}},
                        "required": ["query"]},
     },
+}, {
+    "type": "function",
+    "function": {
+        "name": "open_url",
+        "description": "Open a web page and read its text. Use when the user gives a link or asks what a specific website says.",
+        "parameters": {"type": "object",
+                       "properties": {"url": {"type": "string"}},
+                       "required": ["url"]},
+    },
 }]
+
+
+def open_url(url):
+    """Mini browser: fetch a public page and return its readable text (no logins, no JavaScript)."""
+    import ipaddress, socket
+    from urllib.parse import urlparse
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    host = urlparse(url).hostname or ""
+    try:
+        for fam, _, _, _, addr in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(addr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return "That address isn't a public website."
+        r = requests.get(url, timeout=15, stream=True, allow_redirects=True,
+                         headers={"User-Agent": "Mozilla/5.0 (TygarsBot; +fan-made)"})
+        raw = r.raw.read(1_500_000, decode_content=True).decode(r.encoding or "utf-8", "ignore")
+    except Exception as e:
+        return f"Couldn't open {url} ({type(e).__name__})."
+    if "html" not in r.headers.get("content-type", "html"):
+        return f"{url} isn't a web page I can read ({r.headers.get('content-type')})."
+    title = re.search(r"<title[^>]*>(.*?)</title>", raw, re.S | re.I)
+    raw = re.sub(r"(?is)<(script|style|noscript|svg|nav|footer|header)[^>]*>.*?</\1>", " ", raw)
+    text = re.sub(r"<[^>]+>", " ", raw)
+    text = html.unescape(re.sub(r"\s+", " ", text)).strip()
+    t = html.unescape(title.group(1).strip()) if title else ""
+    return f"Page: {url}\nTitle: {t}\n{text[:6000]}" if text else f"{url} has no readable text (it may need JavaScript or a login)."
 
 
 def web_search(query):
@@ -216,34 +253,45 @@ def ask_ai(user, text):
     del past[:-10]
     try:
         today = time.strftime("%A %d %B %Y", time.gmtime())
-        sys_msg = SYSTEM + f" Today is {today}. Your built-in knowledge is old, so ALWAYS call web_search before answering anything about recent events, winners, prices, news, or people's current roles."
+        sys_msg = SYSTEM + f" Today is {today}. Your built-in knowledge is old, so ALWAYS call web_search before answering (or open_url for a specific site) anything about recent events, winners, prices, news, or people's current roles."
         msgs = [{"role": "system", "content": sys_msg}] + past
-        m = groq(msgs)
         found = []
         rounds = 0
+        link = re.search(r"(https?://\S+|www\.\S+)", text)
+        if link:
+            found.append(open_url(link.group(1).rstrip(").,!?")))
+            m = {"tool_calls": True}   # answer straight from the page
+            rounds = 1
+        else:
+            m = groq(msgs)
         while m.get("tool_calls") and rounds < 1:
             rounds += 1
             msgs.append({"role": "assistant", "tool_calls": m["tool_calls"]})
             for c in m["tool_calls"]:
                 try:
-                    q = json.loads(c["function"]["arguments"]).get("query", text)
+                    args = json.loads(c["function"]["arguments"])
                 except Exception:
-                    q = text
-                res = web_search(q)
-                found.append(f"Search: {q}\n{res}")
+                    args = {}
+                if c["function"]["name"] == "open_url" and args.get("url"):
+                    res = open_url(args["url"])
+                    found.append(res)
+                else:
+                    q = args.get("query", text)
+                    res = web_search(q)
+                    found.append(f"Search: {q}\n{res}")
                 msgs.append({"role": "tool", "tool_call_id": c["id"], "content": res})
             m = {"tool_calls": True}
         if m.get("tool_calls"):
             # final answer from what was found, with tools switched off entirely
             final = [{"role": "system", "content": sys_msg}] + past[:-1] + [{
                 "role": "user",
-                "content": text + "\n\nWeb search results:\n" + "\n\n".join(found)
-                           + "\n\nAnswer using these results; prefer the newest dated items from trusted outlets, give scores/dates exactly, name the source and date, and if nothing confirms it say you couldn't verify it. Plain text, short."}]
+                "content": text + "\n\nWeb results:\n" + "\n\n".join(found)
+                           + "\n\nAnswer using these results; prefer the newest dated items from trusted outlets, give scores/dates exactly, name the source and date, and if nothing confirms it say you couldn't verify it. Use ONLY facts written in these results: never add a score, number, name or date that isn't in them. Plain text, no markdown, short."}]
             try:
                 m = groq(final, tools=False)
             except Exception:
                 m = groq(final, tools=False, model=FINAL_MODEL)
-        reply = (m.get("content") or "").strip() or "Sorry, I couldn't find an answer."
+        reply = (m.get("content") or "").replace("**", "").strip() or "Sorry, I couldn't find an answer."
     except Exception as e:
         print("AI error:", e)
         reply = "Sorry, I'm having trouble right now. Please try again in a moment."
