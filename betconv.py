@@ -165,18 +165,8 @@ def waf_cookies(domain, force=False):
                 ctx = b.new_context(user_agent=UA, locale="en-US")
                 ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "media", "font", "websocket") else r.continue_())
                 pg = ctx.new_page()
-                resp = pg.goto(f"https://www.{domain}/ng/", wait_until="domcontentloaded", timeout=45000)
-                ck = {}
-                for _ in range(20):
-                    ck = {c["name"]: c["value"] for c in ctx.cookies()}
-                    if "aws-waf-token" in ck:
-                        break
-                    pg.wait_for_timeout(1000)
-                diag = {"goto_status": resp.status if resp else None, "title": (pg.title() or "")[:80]}
-                try:   # can the page itself call the API (same origin, after the check)?
-                    diag["in_page"] = pg.evaluate("fetch('/api/ng/orders/share/VESTC6').then(r => r.status + ' ' + r.headers.get('content-type'))")
-                except Exception as e:
-                    diag["in_page"] = str(e)[:120]
+                diag = {}
+                ck = _solve_waf(pg, ctx, domain, diag)
                 _waf[domain] = {"cookies": ck, "ts": time.time(), "diag": diag}
                 return ck
             finally:
@@ -197,8 +187,9 @@ _tl = threading.local()
 
 def _page_http(pg, method, url, body):
     path = re.sub(r"^https?://[^/]+", "", url)
-    js = """async ([m, p, b]) => { const r = await fetch(p, {method: m, headers: b === null ? {} : {'Content-Type': 'application/json'},
-            body: b === null ? undefined : b}); return [r.status, await r.text()]; }"""
+    js = """([m, p, b]) => new Promise(res => { const x = new XMLHttpRequest(); x.open(m, p);
+            if (b !== null) x.setRequestHeader('Content-Type', 'application/json');
+            x.onload = () => res([x.status, x.responseText]); x.onerror = () => res([0, '']); x.send(b); })"""
     st, txt = pg.evaluate(js, [method, path, None if body is None else json.dumps(body)])
     if st == 202 and not txt.strip():
         raise WafBlocked(f"{_domain(url)} is blocking our server right now")
@@ -224,8 +215,8 @@ class page_session:
             ctx = self.b.new_context(user_agent=UA, locale="en-US")
             ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "media", "font", "websocket") else r.continue_())
             pg = ctx.new_page()
+            _solve_waf(pg, ctx, self.domain, {})
             pg.goto(f"https://www.{self.domain}/ng/", wait_until="domcontentloaded", timeout=45000)
-            pg.wait_for_timeout(3000)
             pages = getattr(_tl, "pages", {})
             pages[self.domain] = pg
             _tl.pages = pages
@@ -245,6 +236,34 @@ class page_session:
             if self.own:
                 _tl.held = False
                 _deps["lock"].release()
+
+
+def _solve_waf(pg, ctx, domain, diag):
+    """Open the API URL as a page: the bot check then runs its browser challenge and sets aws-waf-token."""
+    api = f"https://www.{domain}/api/ng/orders/share/VESTC6"
+    ck = {}
+    for step, url in enumerate((api, f"https://www.{domain}/ng/", api)):
+        try:
+            resp = pg.goto(url, wait_until="domcontentloaded", timeout=40000)
+            diag[f"goto{step}"] = resp.status if resp else None
+        except Exception as e:
+            diag[f"goto{step}"] = str(e)[:80]
+        for _ in range(15):
+            ck = {c["name"]: c["value"] for c in ctx.cookies()}
+            if "aws-waf-token" in ck:
+                break
+            pg.wait_for_timeout(1000)
+        if "aws-waf-token" in ck:
+            break
+    try:
+        diag["body"] = (pg.evaluate("document.body ? document.body.innerText : ''") or "")[:100]
+        diag["wafjs"] = pg.evaluate("typeof window.AwsWafIntegration")
+        diag["xhr"] = pg.evaluate("""() => new Promise(res => { const x = new XMLHttpRequest();
+            x.open('GET', '/api/ng/orders/share/VESTC6'); x.onload = () => res(x.status + ' ' + x.responseText.slice(0, 40));
+            x.onerror = () => res('err'); x.send(); })""")
+    except Exception as e:
+        diag["eval"] = str(e)[:120]
+    return ck
 
 
 def http(method, url, body=None):
