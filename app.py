@@ -333,7 +333,10 @@ def telegram_incoming():
         file_id = (msg["photo"][-2] if len(msg["photo"]) > 1 else msg["photo"][-1])["file_id"]  # ~800px, saves tokens
     elif (msg.get("document") or {}).get("mime_type", "").startswith("image/"):
         file_id = msg["document"]["file_id"]
-    if chat and file_id:
+    voice = msg.get("voice") or msg.get("audio") or msg.get("video_note")
+    if chat and voice and not file_id:
+        threading.Thread(target=telegram_voice_reply, args=(chat, voice), daemon=True).start()
+    elif chat and file_id:
         threading.Thread(target=telegram_photo_reply,
                          args=(chat, file_id, msg.get("caption") or ""), daemon=True).start()
     elif text and chat:
@@ -342,6 +345,38 @@ def telegram_incoming():
 
 
 VISION_MODEL = "qwen/qwen3.8-27b"
+
+
+def telegram_voice_reply(chat, voice):
+    """Voice note -> Groq Whisper transcript -> normal answer."""
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
+                      json={"chat_id": chat, "action": "typing"}, timeout=5)
+        if voice.get("duration", 0) > 300 or voice.get("file_size", 0) > 19_000_000:
+            reply = "That voice note is too long. Please keep it under 5 minutes."
+        else:
+            info = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile",
+                                params={"file_id": voice["file_id"]}, timeout=15).json()["result"]
+            audio = requests.get(f"https://api.telegram.org/file/bot{TG_TOKEN}/{info['file_path']}",
+                                 timeout=60).content
+            name = info["file_path"].rsplit("/", 1)[-1]
+            if name.endswith(".oga"):
+                name = name[:-4] + ".ogg"
+            r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+                              headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                              files={"file": (name, audio)},
+                              data={"model": "whisper-large-v3-turbo"}, timeout=60)
+            r.raise_for_status()
+            said = (r.json().get("text") or "").strip()
+            if not said:
+                reply = "I couldn't hear anything in that voice note. Try again a bit louder."
+            else:
+                reply = "\U0001F3A4 \"" + said[:300] + "\"\n\n" + ask_ai(f"tg:{chat}", said)
+    except Exception as e:
+        print("voice error:", e)
+        reply = "Sorry, I couldn't listen to that voice note. Please try again or type it."
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                  json={"chat_id": chat, "text": reply[:4000]}, timeout=20)
 
 
 def telegram_photo_reply(chat, file_id, caption):
@@ -380,7 +415,7 @@ def telegram_reply(chat, text):
     if text.strip() == "/browse":
         reply = ""
     elif text.strip() == "/start":
-        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything: school work, tech, "
+        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note): school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
         try:
