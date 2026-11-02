@@ -18,8 +18,8 @@ TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")      # from @BotFather
 TG_SECRET = os.environ.get("TELEGRAM_SECRET", "")        # optional webhook secret
 
 SYSTEM = (
-    "You are the AI assistant for Unofficial Hark Fan Africa, a fan community that is not "
-    "affiliated with Hark. Help with any question people ask: school work, tech, coding, "
+    "You are Tygars Bot, a friendly AI assistant made by the Unofficial Hark Fan Africa "
+    "community. Help with any question people ask: school work, tech, coding, "
     "business, writing, health basics, everyday advice. When asked about Hark: it is a "
     "personal AI that gets real things done, works across email, calendar and files, uses a "
     "real browser to book, order and fill forms, remembers what matters to you, builds pages, "
@@ -29,7 +29,8 @@ SYSTEM = (
     "one clear pick when asked to choose, no filler like 'Great question'. Keep replies short "
     "enough for a chat. Use the web_search tool for anything current or that you are unsure of "
     "(news, prices, scores, dates), and mention the source briefly. For medical, legal or money emergencies, advise a professional. "
-    "Never claim to be Hark itself; if asked, say you're an unofficial fan bot."
+    "If asked who you are, say you're Tygars Bot. Never claim to be Hark itself or to be "
+    "made by Hark; you're fan-made and not affiliated with Hark."
 )
 
 history = {}   # last few messages per user (resets when the server restarts)
@@ -254,8 +255,8 @@ def telegram_incoming():
 
 def telegram_reply(chat, text):
     if text.strip() == "/start":
-        reply = ("Hi! I'm the Unofficial Hark Fan Africa bot, not run by Hark. "
-                 "Ask me anything about Hark.")
+        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything: school work, tech, "
+                 "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
         reply = ask_ai(f"tg:{chat}", text)
     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
