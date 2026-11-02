@@ -772,6 +772,10 @@ def telegram_reply(chat, text, reply_to_text=""):
         return todo_cmd(chat, "/todo " + text)
     if mode == "stt":
         return tg_send(chat, "Please send a voice note and I'll write out what was said.")
+    if low0.startswith("/open"):
+        return telegram_open(chat, text)
+    if mode == "web":
+        return telegram_open(chat, "/open " + text)
     if low0 in ("/menu", "menu", "/help"):
         return tg_send(chat, "🐯 Tygars Bot menu. Tap what you need:", main_menu())
     if low0.startswith("/reminders") or low0 in ("my reminders", "show my reminders"):
@@ -1173,7 +1177,7 @@ def main_menu():
             [{"text": "\U0001F50A Text to speech", "callback_data": "m:tts"}, {"text": "\U0001F3A4 Speech to text", "callback_data": "m:stt"}],
             [{"text": "\U0001F4C4 Make a PDF", "callback_data": "m:pdf"}, {"text": "\u23F0 Reminders", "callback_data": "m:remind"}],
             [{"text": "\U0001F4DD To-do list", "callback_data": "m:todo"}, {"text": "\U0001F4AC Live chat", "web_app": {"url": BROWSE_URL.replace("/browse", "/chat")}}],
-            [{"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}]]
+            [{"text": "\U0001F5A5 Open a website", "callback_data": "m:web"}, {"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}]]
     rows += [[{"text": f"\U0001D54F Follow {h} on X", "url": u}] for h, u in X_HANDLES]
     return {"inline_keyboard": rows}
 
@@ -1186,6 +1190,7 @@ MENU_PROMPTS = {
     "pdf": "\U0001F4C4 What should the PDF be about?",
     "remind": "\u23F0 What should I remind you about, and when? e.g. every day at 7am to read",
     "todo": "\U0001F4DD Send the task to add to your to-do list.",
+    "web": "\U0001F5A5 Send a website and I'll open it and show you, e.g. jumia.com.ng",
 }
 
 
@@ -1204,6 +1209,8 @@ def telegram_callback(cb):
                 todo_cmd(chat, "/todo list")
             pending_mode[chat] = (k, time.time())
             tg_send(chat, MENU_PROMPTS.get(k, "Send it over."))
+        elif data.startswith("w:") or data.startswith("wl:"):
+            web_callback(chat, data)
         elif data.startswith("rmdel:"):
             tq("delete from bot_reminders where id=? and chat=?", (int(data[6:]), chat))
             tg_send(chat, "\U0001F5D1 Reminder deleted.")
@@ -1248,6 +1255,249 @@ def reminder_loop():
 
 if TG_TOKEN:
     threading.Thread(target=reminder_loop, daemon=True).start()
+
+
+# ---------- /open and /record: read-only web viewer with screenshots and screen video ----------
+_pw_lock = threading.Lock()
+_pw_ready = [False]
+last_page = {}        # chat -> {"url": str, "y": int, "links": [(text, href)]}
+WEB_LIMITS = {"open": 25, "rec": 4}
+
+
+def ensure_browser():
+    """Download Chromium (headless shell) on first use; no system packages needed."""
+    if _pw_ready[0]:
+        return True
+    import subprocess, sys
+    try:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"],
+                       check=True, capture_output=True, timeout=300)
+        _pw_ready[0] = True
+    except Exception as e:
+        print("playwright install error:", getattr(e, "stderr", b"")[-500:] if hasattr(e, "stderr") else e)
+    return _pw_ready[0]
+
+
+def safe_url(u):
+    import ipaddress, socket
+    from urllib.parse import urlparse
+    u = u.strip().strip("<>")
+    if not re.match(r"^https?://", u, re.I):
+        u = "https://" + u
+    p = urlparse(u)
+    if p.scheme not in ("http", "https") or not p.hostname or "." not in p.hostname:
+        return None
+    try:
+        for info in socket.getaddrinfo(p.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return None
+    except Exception:
+        return None
+    return u
+
+
+def web_quota(chat, kind):
+    day = time.strftime("%Y-%m-%d")
+    k = (chat, "web" + kind, day)
+    if _media_use.get(k, 0) >= WEB_LIMITS[kind]:
+        return False
+    _media_use[k] = _media_use.get(k, 0) + 1
+    return True
+
+
+def _launch(p):
+    return p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                                   "--single-process", "--no-zygote", "--js-flags=--max-old-space-size=128"])
+
+
+def shoot_page(url, y=0, record=False):
+    """Open url (read-only), scroll to y. Returns dict with png, title, text, links, final url, video."""
+    import tempfile
+    from playwright.sync_api import sync_playwright
+    out = {}
+    vdir = tempfile.mkdtemp() if record else None
+    with sync_playwright() as p:
+        b = _launch(p)
+        try:
+            opts = dict(viewport={"width": 1366, "height": 768}, device_scale_factor=1,
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 TygarsBot")
+            if record:
+                opts.update(device_scale_factor=1, record_video_dir=vdir, record_video_size={"width": 412, "height": 860})
+            ctx = b.new_context(**opts)
+            ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("media", "websocket") else r.continue_())
+            pg = ctx.new_page()
+            pg.goto(url, wait_until="domcontentloaded", timeout=30000)
+            pg.wait_for_timeout(2500)
+            if record:
+                for _ in range(5):
+                    pg.mouse.wheel(0, 500)
+                    pg.wait_for_timeout(1100)
+                pg.wait_for_timeout(600)
+            elif y:
+                pg.evaluate(f"window.scrollTo(0, {int(y)})")
+                pg.wait_for_timeout(900)
+            out["png"] = pg.screenshot(type="jpeg", quality=70)
+            out["title"] = (pg.title() or "")[:120]
+            out["url"] = pg.url
+            out["text"] = pg.evaluate("document.body ? document.body.innerText : ''")[:5000]
+            out["links"] = pg.evaluate("""() => [...document.querySelectorAll('a[href^="http"]')]
+                .map(a => [(a.innerText||'').trim().replace(/\\s+/g,' ').slice(0,40), a.href])
+                .filter(x => x[0].length > 2).slice(0, 40)""")
+            vpath = pg.video.path() if record else None
+            ctx.close()
+            if record and vpath:
+                out["video"] = to_mp4(vpath)
+        finally:
+            b.close()
+    return out
+
+
+def to_mp4(webm):
+    import subprocess, imageio_ffmpeg
+    mp4 = webm.rsplit(".", 1)[0] + ".mp4"
+    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", webm, "-c:v", "libx264", "-preset", "veryfast",
+                    "-crf", "28", "-pix_fmt", "yuv420p", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-movflags", "+faststart", mp4],
+                   check=True, capture_output=True, timeout=120)
+    return open(mp4, "rb").read()
+
+
+def page_summary(title, text):
+    try:
+        msgs = [{"role": "system", "content": "Summarize this web page for a phone user in 2-4 short sentences: what the site is and the main things on screen. Plain text, no markdown."},
+                {"role": "user", "content": f"Title: {title}\n\n{text[:3500]}"}]
+        out = (groq(msgs, tools=False).get("content") or "").strip()
+        return re.sub(r"<think>.*?</think>", "", out, flags=re.S).strip()[:700]
+    except Exception as e:
+        print("summary error:", e)
+        return ""
+
+
+def web_buttons(chat):
+    lp = last_page.get(chat) or {}
+    rows = [[{"text": "\u2B07 Scroll down", "callback_data": "w:down"}, {"text": "\U0001F517 Links", "callback_data": "w:links"}],
+            []]
+    if lp.get("url"):
+        rows[1].append({"text": "\U0001F310 Open in browser", "url": lp["url"]})
+    return {"inline_keyboard": rows}
+
+
+SIGNUP_ASK = re.compile(r"\b(register|sign ?up|log ?in|create (an )?account|fill|enter my|my (number|phone|password|otp|pin|bvn))\b", re.I)
+
+
+def microlink_shot(url):
+    """Fallback when Chromium can't run on the server: free Microlink screenshot (about 50 a day)."""
+    r = requests.get("https://api.microlink.io/", timeout=60, params={
+        "url": url, "screenshot": "true", "meta": "true", "viewport.width": 1366, "viewport.height": 768})
+    j = r.json()
+    if j.get("status") != "success":
+        raise RuntimeError(j.get("message") or "microlink failed")
+    d = j["data"]
+    png = requests.get(d["screenshot"]["url"], timeout=60).content
+    return {"png": png, "title": (d.get("title") or "")[:120], "url": d.get("url") or url,
+            "text": (d.get("description") or ""), "links": [], "fallback": True}
+
+
+_webcheck = {}
+
+
+@app.get("/webcheck")
+def webcheck():
+    """Tells whether the web viewer's browser works on this server (no page content returned)."""
+    if "ok" not in _webcheck and _pw_lock.acquire(blocking=False):
+        try:
+            _webcheck["install"] = ensure_browser()
+            try:
+                r = shoot_page("https://example.com")
+                _webcheck["ok"] = bool(r.get("png"))
+            except Exception as e:
+                _webcheck["ok"] = False
+                _webcheck["error"] = str(e).splitlines()[0][:200]
+                m = re.search(r"error while loading shared libraries: (\S+)", str(e))
+                if m:
+                    _webcheck["missing"] = m.group(1)
+        finally:
+            _pw_lock.release()
+    return _webcheck or {"status": "busy"}
+
+
+def telegram_open(chat, text, record=False, y=0, url=None):
+    arg = text.split(None, 1)[1].strip() if text and len(text.split(None, 1)) > 1 else ""
+    if arg and SIGNUP_ASK.search(arg) and not re.match(r"^\S+\.\S+$", arg):
+        return tg_send(chat, "I can show you a site and explain the steps, but I never sign up, log in or type phone numbers, "
+                             "passwords or codes for anyone. Keep those private. Send /open with the website, e.g. /open jumia.com.ng")
+    target = url or (re.search(r"\S+\.\S+", arg).group(0) if re.search(r"\S+\.\S+", arg) else "")
+    if not target:
+        return tg_send(chat, "Send a website after the command, e.g. /open jumia.com.ng")
+    u = safe_url(target)
+    if not u:
+        return tg_send(chat, "That link doesn't look like a public website.")
+    if not web_quota(chat, "rec" if record else "open"):
+        return tg_send(chat, "You've reached today's limit for that. Try again tomorrow.")
+    if not _pw_lock.acquire(blocking=False):
+        tg_send(chat, "\u23F3 Someone else is using the web viewer, you're next...")
+        _pw_lock.acquire()
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
+                      json={"chat_id": chat, "action": "record_video" if record else "upload_photo"}, timeout=5)
+        if not _pw_ready[0] and _webcheck.get("ok") is not False:
+            tg_send(chat, "\U0001F310 Starting the web viewer (first time takes about a minute)...")
+        r = None
+        if _webcheck.get("ok") is not False and ensure_browser():
+            try:
+                r = shoot_page(u, y=y, record=record)
+            except Exception as e:
+                print("open error:", str(e)[:300])
+                if "shared libraries" in str(e) or "launch" in str(e):
+                    _webcheck["ok"] = False
+        if r is None and not y:
+            try:
+                r = microlink_shot(u)
+            except Exception as e:
+                print("microlink error:", e)
+        if r is None:
+            return tg_send(chat, "Sorry, that page didn't load. It may be down or blocking bots.")
+    finally:
+        _pw_lock.release()
+    last_page[chat] = {"url": r["url"], "y": y, "links": r.get("links", []), "fallback": r.get("fallback")}
+    if record and r.get("video"):
+        resp = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo",
+                             data={"chat_id": chat, "caption": f"\U0001F3A5 {r['title'] or r['url']}"[:1000], "supports_streaming": "true",
+                                   "reply_markup": json.dumps(web_buttons(chat))},
+                             files={"video": ("screen.mp4", r["video"], "video/mp4")}, timeout=120)
+    else:
+        summ = page_summary(r["title"], r["text"]) if not y else ""
+        cap = f"\U0001F310 {r['title'] or r['url']}" + (f"\n\n{summ}" if summ else "")
+        resp = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+                             data={"chat_id": chat, "caption": cap[:1000], "reply_markup": json.dumps(web_buttons(chat))},
+                             files={"photo": ("page.jpg", r["png"], "image/jpeg")}, timeout=60)
+    if resp.status_code >= 300:
+        print("web send error:", resp.status_code, resp.text[:300])
+        tg_send(chat, "Sorry, I couldn't send that.")
+    else:
+        remember(chat, text or u, f"[showed the web page {r['url']}: {r['title']}]")
+
+
+def web_callback(chat, data):
+    lp = last_page.get(chat)
+    if not lp:
+        return tg_send(chat, "Open a page first, e.g. /open jumia.com.ng")
+    if data == "w:down" and lp.get("fallback"):
+        return tg_send(chat, "Scrolling isn't available for this page right now. Tap Open in browser to see more.")
+    if data == "w:down":
+        return telegram_open(chat, "", y=lp["y"] + 700, url=lp["url"])
+    if data == "w:links":
+        links = lp.get("links") or []
+        if not links:
+            return tg_send(chat, "I didn't find links on that page.")
+        lp["pick"] = links[:10]
+        kb = [[{"text": t[:40], "callback_data": f"wl:{i}"}] for i, (t, h) in enumerate(links[:10])]
+        return tg_send(chat, "Tap a link to open it:", {"inline_keyboard": kb})
+    if data.startswith("wl:"):
+        pick = lp.get("pick") or []
+        i = int(data[3:])
+        if i < len(pick):
+            return telegram_open(chat, "", url=pick[i][1])
 
 
 def keep_awake():
