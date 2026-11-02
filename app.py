@@ -43,6 +43,9 @@ SYSTEM = (
     "made by Hark; you're fan-made and not affiliated with Hark."
 )
 
+TG_CREATOR = (" If asked who made or created you, say you were made by Amarachukwu Franklin from "
+              "Enugu State, a student at Enugu State University of Science and Technology (ESUT).")
+
 history = {}   # last few messages per user (resets when the server restarts)
 seen = set()   # message ids already answered, so Meta retries are ignored
 
@@ -254,6 +257,8 @@ def ask_ai(user, text):
     try:
         today = time.strftime("%A %d %B %Y", time.gmtime())
         sys_msg = SYSTEM + f" Today is {today}. Your built-in knowledge is old, so ALWAYS call web_search before answering (or open_url for a specific site) anything about recent events, winners, prices, news, or people's current roles."
+        if user.startswith("tg:"):
+            sys_msg += TG_CREATOR
         msgs = [{"role": "system", "content": sys_msg}] + past
         found = []
         rounds = 0
@@ -372,7 +377,9 @@ def telegram_photo_reply(chat, file_id, caption):
 
 
 def telegram_reply(chat, text):
-    if text.strip() == "/start":
+    if text.strip() == "/browse":
+        reply = ""
+    elif text.strip() == "/start":
         reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything: school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
@@ -382,10 +389,53 @@ def telegram_reply(chat, text):
         except Exception:
             pass
         reply = ask_ai(f"tg:{chat}", text)
+    payload = {"chat_id": chat, "text": reply}
+    if text.strip() in ("/start", "/browse"):
+        if text.strip() == "/browse":
+            payload["text"] = "Tap below to browse the web inside Telegram \U0001F310"
+        payload["reply_markup"] = {"inline_keyboard": [[{"text": "\U0001F310 Browse the web",
+                                   "web_app": {"url": BROWSE_URL}}]]}
     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                      json={"chat_id": chat, "text": reply}, timeout=20)
+                      json=payload, timeout=20)
     if r.status_code >= 300:
         print("Telegram error:", r.status_code, r.text)
+
+
+BROWSE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://hark-whatsapp-bot.onrender.com") + "/browse"
+
+BROWSE_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tygars Browse</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#111);padding:18px}
+h1{font-size:20px;margin:4px 0 14px}
+form{display:flex;gap:8px}
+input{flex:1;padding:12px;border-radius:12px;border:1px solid #8884;font-size:16px;background:var(--tg-theme-secondary-bg-color,#f3f3f3);color:inherit}
+button{padding:12px 16px;border:0;border-radius:12px;font-size:16px;background:var(--tg-theme-button-color,#2a8af6);color:var(--tg-theme-button-text-color,#fff)}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}
+.grid a{display:block;text-align:center;padding:14px 6px;border-radius:12px;background:var(--tg-theme-secondary-bg-color,#f3f3f3);color:inherit;text-decoration:none;font-size:14px}
+p.note{font-size:12px;opacity:.6;margin-top:18px}
+</style></head><body>
+<h1>\U0001F42F Tygars Browse</h1>
+<form id="f"><input id="q" placeholder="Search or type a website" autocomplete="off" enterkeyhint="go"><button>Go</button></form>
+<div class="grid" id="g"></div>
+<p class="note">Pages open in Telegram's built-in browser. Fan-made, not affiliated with Hark.</p>
+<script>
+const tg=window.Telegram&&Telegram.WebApp; if(tg){tg.ready();tg.expand();}
+function go(u){ if(tg&&tg.openLink){tg.openLink(u,{try_instant_view:true});} else {location.href=u;} }
+const sites=[["Google","https://www.google.com"],["BBC News","https://www.bbc.com/news"],["Football","https://www.bbc.com/sport/football"],["Wikipedia","https://en.m.wikipedia.org"],["YouTube","https://m.youtube.com"],["Punch","https://punchng.com"],["Weather","https://www.accuweather.com"],["JAMB","https://www.jamb.gov.ng"],["Hark","https://hark.com"]];
+document.getElementById("g").innerHTML=sites.map(s=>`<a href="#" data-u="${s[1]}">${s[0]}</a>`).join("");
+document.getElementById("g").onclick=e=>{const u=e.target.dataset.u; if(u){e.preventDefault();go(u);}};
+document.getElementById("f").onsubmit=e=>{e.preventDefault();let v=document.getElementById("q").value.trim(); if(!v)return;
+ if(/^(https?:\\/\\/)?[\\w-]+(\\.[\\w-]+)+(\\/\\S*)?$/.test(v) && !v.includes(" ")){ if(!/^https?:/.test(v)) v="https://"+v; go(v);}
+ else go("https://www.google.com/search?q="+encodeURIComponent(v)); };
+</script></body></html>"""
+
+
+@app.get("/browse")
+def browse_page():
+    return Response(BROWSE_HTML, mimetype="text/html")
 
 
 def keep_awake():
