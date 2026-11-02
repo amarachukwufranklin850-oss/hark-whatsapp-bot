@@ -2,3 +2,5 @@ flask
 requests
 gunicorn
 fpdf2
+edge-tts
+psycopg2-binary

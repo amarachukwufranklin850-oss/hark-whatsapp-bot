@@ -46,7 +46,49 @@ SYSTEM = (
 TG_CREATOR = (" If asked who made or created you, say you were made by Amarachukwu Franklin from "
               "Enugu State, a student at the State University of Medical and Applied Sciences (SUMAS), Igbo-Eno.")
 
-history = {}   # last few messages per user (resets when the server restarts)
+DB_URL = os.environ.get("DATABASE_URL", "")
+
+
+class Memory(dict):
+    """Per-user chat history. Kept in RAM and saved to Postgres (Neon) when DATABASE_URL is set."""
+
+    ready = False
+
+    def _conn(self):
+        import psycopg2
+        c = psycopg2.connect(DB_URL, connect_timeout=8)
+        if not Memory.ready:
+            with c, c.cursor() as cur:
+                cur.execute("create table if not exists bot_memory (user_id text primary key, "
+                            "history jsonb, facts text, updated_at timestamptz default now())")
+            Memory.ready = True
+        return c
+
+    def setdefault(self, user, default=None):
+        if user not in self and DB_URL:
+            try:
+                with self._conn() as c, c.cursor() as cur:
+                    cur.execute("select history from bot_memory where user_id=%s", (user,))
+                    row = cur.fetchone()
+                    if row:
+                        dict.__setitem__(self, user, list(row[0]))
+            except Exception as e:
+                print("memory load error:", e)
+        return dict.setdefault(self, user, default if default is not None else [])
+
+    def save(self, user):
+        if not DB_URL or user not in self:
+            return
+        try:
+            with self._conn() as c, c.cursor() as cur:
+                cur.execute("insert into bot_memory (user_id, history, updated_at) values (%s, %s::jsonb, now()) "
+                            "on conflict (user_id) do update set history=excluded.history, updated_at=now()",
+                            (user, json.dumps(self[user][-20:])))
+        except Exception as e:
+            print("memory save error:", e)
+
+
+history = Memory()   # remembers each user across restarts when the database is connected
 seen = set()   # message ids already answered, so Meta retries are ignored
 
 
@@ -253,13 +295,13 @@ def groq(messages, tools=True, model=None):
 def ask_ai(user, text):
     past = history.setdefault(user, [])
     past.append({"role": "user", "content": text})
-    del past[:-10]
+    del past[:-20]
     try:
         today = time.strftime("%A %d %B %Y", time.gmtime())
         sys_msg = SYSTEM + f" Today is {today}. Your built-in knowledge is old, so ALWAYS call web_search before answering (or open_url for a specific site) anything about recent events, winners, prices, news, or people's current roles."
         if user.startswith("tg:"):
             sys_msg += TG_CREATOR
-        msgs = [{"role": "system", "content": sys_msg}] + past
+        msgs = [{"role": "system", "content": sys_msg}] + past[-12:]
         found = []
         rounds = 0
         link = re.search(r"(https?://\S+|www\.\S+)", text)
@@ -288,7 +330,7 @@ def ask_ai(user, text):
             m = {"tool_calls": True}
         if m.get("tool_calls"):
             # final answer from what was found, with tools switched off entirely
-            final = [{"role": "system", "content": sys_msg}] + past[:-1] + [{
+            final = [{"role": "system", "content": sys_msg}] + past[-12:-1] + [{
                 "role": "user",
                 "content": text + "\n\nWeb results:\n" + "\n\n".join(found)
                            + "\n\nAnswer using these results; prefer the newest dated items from trusted outlets, give scores/dates exactly, name the source and date, and if nothing confirms it say you couldn't verify it. Use ONLY facts written in these results: never add a score, number, name or date that isn't in them. Plain text, no markdown, short."}]
@@ -301,6 +343,8 @@ def ask_ai(user, text):
         print("AI error:", e)
         reply = "Sorry, I'm having trouble right now. Please try again in a moment."
     past.append({"role": "assistant", "content": reply})
+    del past[:-20]
+    history.save(user)
     return reply
 
 
@@ -340,7 +384,8 @@ def telegram_incoming():
         threading.Thread(target=telegram_photo_reply,
                          args=(chat, file_id, msg.get("caption") or ""), daemon=True).start()
     elif text and chat:
-        threading.Thread(target=telegram_reply, args=(chat, text), daemon=True).start()
+        quoted = (msg.get("reply_to_message") or {}).get("text") or ""
+        threading.Thread(target=telegram_reply, args=(chat, text, quoted), daemon=True).start()
     return "ok", 200
 
 
@@ -403,7 +448,8 @@ def telegram_photo_reply(chat, file_id, caption):
             h = history.setdefault(f"tg:{chat}", [])
             h += [{"role": "user", "content": f"[sent an image] {caption}"},
                   {"role": "assistant", "content": reply}]
-            del h[:-10]
+            del h[:-20]
+            history.save(f"tg:{chat}")
     except Exception as e:
         print("photo error:", e)
         reply = "Sorry, I couldn't open that image. Please try sending it again."
@@ -476,20 +522,70 @@ def telegram_pdf_reply(chat, text):
             raise RuntimeError("send failed")
         h = history.setdefault(f"tg:{chat}", [])
         h += [{"role": "user", "content": text}, {"role": "assistant", "content": f"[sent a PDF: {title}]"}]
-        del h[:-10]
+        del h[:-20]
+        history.save(f"tg:{chat}")
     except Exception as e:
         print("pdf error:", e)
         requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                       json={"chat_id": chat, "text": "Sorry, I couldn't make that PDF. Please try again."}, timeout=20)
 
 
-def telegram_reply(chat, text):
+TTS_VOICE = "en-NG-AbeoNeural"   # Nigerian English voice (Microsoft Edge TTS, free)
+VOICE_ASK = re.compile(r"\b(voice note|voice reply|in (a )?voice|audio|read (it|this|that) (out|aloud)|say it|speak it|talk to me)\b", re.I)
+
+
+def tts_mp3(text):
+    import asyncio, tempfile, edge_tts
+    clean = re.sub(r"[*_#`]", "", text)[:1500]
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        path = f.name
+    asyncio.run(edge_tts.Communicate(clean, TTS_VOICE).save(path))
+    data = open(path, "rb").read()
+    os.remove(path)
+    return data
+
+
+def send_voice(chat, text, caption=""):
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
+                      json={"chat_id": chat, "action": "record_voice"}, timeout=5)
+        audio = tts_mp3(text)
+        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendAudio",
+                          data={"chat_id": chat, "title": "Tygars Bot", "performer": "Tygars",
+                                "caption": caption[:1000]},
+                          files={"audio": ("tygars.mp3", audio, "audio/mpeg")}, timeout=60)
+        if r.status_code >= 300:
+            print("sendAudio error:", r.status_code, r.text)
+            raise RuntimeError("send failed")
+        return True
+    except Exception as e:
+        print("tts error:", e)
+        return False
+
+
+def telegram_reply(chat, text, reply_to_text=""):
     if PDF_ASK.search(text) and not text.startswith("/"):
         return telegram_pdf_reply(chat, text)
+    if text.startswith("/speak"):
+        words = text[6:].strip() or reply_to_text
+        if not words:
+            requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                          json={"chat_id": chat, "text": "Send /speak followed by the text, or reply to a message with /speak."}, timeout=20)
+        elif not send_voice(chat, words):
+            requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                          json={"chat_id": chat, "text": "Sorry, I couldn't make the audio right now."}, timeout=20)
+        return
+    if VOICE_ASK.search(text):
+        answer = ask_ai(f"tg:{chat}", text + "\n(Reply in a few spoken-style sentences; it will be read aloud.)")
+        if send_voice(chat, answer, caption=answer):
+            return
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                      json={"chat_id": chat, "text": answer}, timeout=20)
+        return
     if text.strip() == "/browse":
         reply = ""
     elif text.strip() == "/start":
-        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), or ask me to make a PDF: school work, tech, "
+        reply = ("Hey, I'm Tygars Bot \U0001F42F Ask me anything (text, photo or voice note), ask me to make a PDF, or use /speak to hear text read aloud: school work, tech, "
                  "business ideas, news, or everyday questions. I'll keep it quick and clear.")
     else:
         try:
@@ -502,8 +598,9 @@ def telegram_reply(chat, text):
     if text.strip() in ("/start", "/browse"):
         if text.strip() == "/browse":
             payload["text"] = "Tap below to browse the web inside Telegram \U0001F310"
-        payload["reply_markup"] = {"inline_keyboard": [[{"text": "\U0001F310 Browse the web",
-                                   "web_app": {"url": BROWSE_URL}}]]}
+        payload["reply_markup"] = {"inline_keyboard": [[
+            {"text": "\U0001F4AC Live chat", "web_app": {"url": BROWSE_URL.replace("/browse", "/chat")}},
+            {"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}]]}
     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                       json=payload, timeout=20)
     if r.status_code >= 300:
@@ -526,7 +623,7 @@ button{padding:12px 16px;border:0;border-radius:12px;font-size:16px;background:v
 .grid a{display:block;text-align:center;padding:14px 6px;border-radius:12px;background:var(--tg-theme-secondary-bg-color,#f3f3f3);color:inherit;text-decoration:none;font-size:14px}
 p.note{font-size:12px;opacity:.6;margin-top:18px}
 </style></head><body>
-<h1>\U0001F42F Tygars Browse</h1>
+<h1>\U0001F42F Tygars Browse <a href="/chat" style="float:right;font-size:14px;font-weight:400;color:var(--tg-theme-link-color,#2a8af6);text-decoration:none">Chat</a></h1>
 <form id="f"><input id="q" placeholder="Search or type a website" autocomplete="off" enterkeyhint="go"><button>Go</button></form>
 <div class="grid" id="g"></div>
 <p class="note">Pages open in Telegram's built-in browser. Fan-made, not affiliated with Hark.</p>
@@ -540,6 +637,82 @@ document.getElementById("f").onsubmit=e=>{e.preventDefault();let v=document.getE
  if(/^(https?:\\/\\/)?[\\w-]+(\\.[\\w-]+)+(\\/\\S*)?$/.test(v) && !v.includes(" ")){ if(!/^https?:/.test(v)) v="https://"+v; go(v);}
  else go("https://www.google.com/search?q="+encodeURIComponent(v)); };
 </script></body></html>"""
+
+
+CHAT_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Tygars Chat</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{font-family:system-ui,sans-serif;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#111);display:flex;flex-direction:column}
+header{padding:12px 16px;font-weight:600;border-bottom:1px solid #8883;display:flex;justify-content:space-between;align-items:center}
+header a{font-weight:400;font-size:14px;color:var(--tg-theme-link-color,#2a8af6);text-decoration:none}
+#log{flex:1;overflow-y:auto;padding:14px}
+.m{max-width:85%;padding:10px 13px;border-radius:16px;margin:6px 0;white-space:pre-wrap;line-height:1.4;font-size:15px}
+.u{margin-left:auto;background:var(--tg-theme-button-color,#2a8af6);color:var(--tg-theme-button-text-color,#fff);border-bottom-right-radius:4px}
+.b{background:var(--tg-theme-secondary-bg-color,#f1f1f1);border-bottom-left-radius:4px}
+.hint{opacity:.6;text-align:center;font-size:14px;margin-top:30%}
+form{display:flex;gap:8px;padding:10px;border-top:1px solid #8883}
+textarea{flex:1;resize:none;padding:11px;border-radius:20px;border:1px solid #8884;font:inherit;font-size:16px;max-height:120px;background:var(--tg-theme-secondary-bg-color,#f3f3f3);color:inherit}
+button{border:0;border-radius:50%;width:44px;height:44px;font-size:18px;background:var(--tg-theme-button-color,#2a8af6);color:var(--tg-theme-button-text-color,#fff)}
+</style></head><body>
+<header><span>\U0001F42F Tygars Chat</span><a href="/browse">Browse</a></header>
+<div id="log"><div class="hint">Ask me anything. I'll answer live.</div></div>
+<form id="f"><textarea id="q" rows="1" placeholder="Message Tygars"></textarea><button>\u27A4</button></form>
+<script>
+const tg=window.Telegram&&Telegram.WebApp; if(tg){tg.ready();tg.expand();}
+const log=document.getElementById("log"), q=document.getElementById("q");
+function add(cls,t){const d=document.createElement("div");d.className="m "+cls;d.textContent=t;log.appendChild(d);log.scrollTop=log.scrollHeight;return d;}
+q.addEventListener("input",()=>{q.style.height="auto";q.style.height=q.scrollHeight+"px";});
+q.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();document.getElementById("f").requestSubmit();}});
+document.getElementById("f").onsubmit=async e=>{e.preventDefault();const t=q.value.trim();if(!t)return;
+ const h=log.querySelector(".hint");if(h)h.remove();
+ add("u",t);q.value="";q.style.height="auto";const b=add("b","\u2026");
+ try{const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({text:t,initData:tg?tg.initData:""})});const j=await r.json();
+   const words=(j.reply||"Sorry, something went wrong.").split(/(\\s+)/);b.textContent="";
+   for(const w of words){b.textContent+=w;log.scrollTop=log.scrollHeight;await new Promise(r=>setTimeout(r,18));}
+ }catch(err){b.textContent="Connection problem. Please try again.";}
+};
+</script></body></html>"""
+
+
+def tg_user_from_init(init_data):
+    """Check Telegram WebApp initData signature; return the user id or None."""
+    import hmac, hashlib
+    from urllib.parse import parse_qsl
+    if not init_data or not TG_TOKEN:
+        return None
+    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+    got = pairs.pop("hash", "")
+    check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", TG_TOKEN.encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), got):
+        return None
+    if time.time() - int(pairs.get("auth_date", "0")) > 86400:
+        return None
+    try:
+        return json.loads(pairs.get("user", "{}")).get("id")
+    except Exception:
+        return None
+
+
+@app.get("/chat")
+def chat_page():
+    return Response(CHAT_HTML, mimetype="text/html")
+
+
+@app.post("/api/chat")
+def chat_api():
+    d = request.get_json(silent=True) or {}
+    uid = tg_user_from_init(d.get("initData", ""))
+    if not uid:
+        return {"reply": "Please open Tygars Chat from inside the Telegram bot."}, 403
+    text = (d.get("text") or "").strip()[:2000]
+    if not text:
+        return {"reply": ""}
+    return {"reply": ask_ai(f"tg:{uid}", text)}
 
 
 @app.get("/browse")
