@@ -215,8 +215,7 @@ class page_session:
             ctx = self.b.new_context(user_agent=UA, locale="en-US")
             ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "media", "font", "websocket") else r.continue_())
             pg = ctx.new_page()
-            _solve_waf(pg, ctx, self.domain, {})
-            pg.goto(f"https://www.{self.domain}/ng/", wait_until="domcontentloaded", timeout=45000)
+            pg.goto(f"https://www.{self.domain}/api/ng/orders/share/VESTC6", wait_until="domcontentloaded", timeout=45000)
             pages = getattr(_tl, "pages", {})
             pages[self.domain] = pg
             _tl.pages = pages
@@ -274,18 +273,15 @@ def http(method, url, body=None):
     if pg:
         return _page_http(pg, method, url, body)
     needs_waf = d in ("sportybet.com", "football.com")
-    for attempt in range(2):
-        ck = waf_cookies(d, force=attempt == 1) if needs_waf and (attempt == 1 or d in _waf) else {}
-        h = hdrs(url, {"Content-Type": "application/json"} if body is not None else None)
-        r = requests.request(method, url, json=body, headers=h, cookies=ck, timeout=25)
-        if r.status_code == 202 and not r.text.strip() and needs_waf:
-            if attempt == 0:
-                continue
-            raise WafBlocked(f"{d} is blocking our server right now")
-        try:
-            return r.json()
-        except Exception:
-            raise RuntimeError(f"{d} answered {r.status_code} without data")
+    h = hdrs(url, {"Content-Type": "application/json"} if body is not None else None)
+    r = requests.request(method, url, json=body, headers=h, timeout=25)
+    if r.status_code == 202 and not r.text.strip() and needs_waf:
+        # The bot check rejects plain server requests; a real browser page gets through (verified 2026-11-02).
+        raise WafBlocked(f"{d} is blocking direct requests from our server")
+    try:
+        return r.json()
+    except Exception:
+        raise RuntimeError(f"{d} answered {r.status_code} without data")
 
 
 # ---------- load / create per bookie ----------
