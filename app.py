@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import re
+import base64
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 import threading
@@ -196,8 +198,12 @@ def groq(messages, tools=True, model=None):
         body["reasoning_effort"] = "low"
     if tools:
         body["tools"] = TOOLS
-    r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                      headers={"Authorization": f"Bearer {GROQ_KEY}"}, json=body, timeout=40)
+    for attempt in range(2):
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {GROQ_KEY}"}, json=body, timeout=40)
+        if r.status_code != 429 or attempt:
+            break
+        time.sleep(min(float(r.headers.get("retry-after", 7)), 15))   # free-tier rate limit: wait once
     if r.status_code >= 300:
         print("Groq error:", r.status_code, r.text[:500])
     r.raise_for_status()
@@ -269,9 +275,52 @@ def telegram_incoming():
     msg = upd.get("message") or {}
     text = msg.get("text")
     chat = (msg.get("chat") or {}).get("id")
-    if text and chat:
+    file_id = None
+    if msg.get("photo"):
+        file_id = (msg["photo"][-2] if len(msg["photo"]) > 1 else msg["photo"][-1])["file_id"]  # ~800px, saves tokens
+    elif (msg.get("document") or {}).get("mime_type", "").startswith("image/"):
+        file_id = msg["document"]["file_id"]
+    if chat and file_id:
+        threading.Thread(target=telegram_photo_reply,
+                         args=(chat, file_id, msg.get("caption") or ""), daemon=True).start()
+    elif text and chat:
         threading.Thread(target=telegram_reply, args=(chat, text), daemon=True).start()
     return "ok", 200
+
+
+VISION_MODEL = "qwen/qwen3.8-27b"
+
+
+def telegram_photo_reply(chat, file_id, caption):
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction",
+                      json={"chat_id": chat, "action": "typing"}, timeout=5)
+        info = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile",
+                            params={"file_id": file_id}, timeout=15).json()["result"]
+        if info.get("file_size", 0) > 4_000_000:
+            reply = "That image is too big for me. Please send a smaller photo (under 4 MB)."
+        else:
+            img = requests.get(f"https://api.telegram.org/file/bot{TG_TOKEN}/{info['file_path']}",
+                               timeout=30).content
+            mime = "image/png" if info["file_path"].lower().endswith(".png") else "image/jpeg"
+            b64 = base64.b64encode(img).decode()
+            ask = caption or "Look at this image and help with it. If it's a question or homework, solve it step by step. Otherwise say briefly what it shows."
+            msgs = [{"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": ask},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}]
+            reply = (groq(msgs, tools=False, model=VISION_MODEL).get("content") or "").strip()
+            reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.S).replace("**", "").strip() or \
+                "Sorry, I couldn't read that image. Try a clearer photo."
+            h = history.setdefault(f"tg:{chat}", [])
+            h += [{"role": "user", "content": f"[sent an image] {caption}"},
+                  {"role": "assistant", "content": reply}]
+            del h[:-10]
+    except Exception as e:
+        print("photo error:", e)
+        reply = "Sorry, I couldn't open that image. Please try sending it again."
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                  json={"chat_id": chat, "text": reply[:4000]}, timeout=20)
 
 
 def telegram_reply(chat, text):
