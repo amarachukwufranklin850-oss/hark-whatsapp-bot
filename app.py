@@ -1134,9 +1134,17 @@ GATE_INTRO = ("\U0001F512 Quick verification before you use Tygar (one time only
               "Send the screenshot as a normal photo, not forwarded.")
 
 
+DEV_IDS = {7318702964} | {int(x) for x in os.environ.get("DEV_TELEGRAM_IDS", "").replace(" ", "").split(",") if x.isdigit()}
+
+
 def is_verified(uid):
     if not uid:
         return False
+    try:
+        if int(uid) in DEV_IDS:          # developers skip the gate
+            return True
+    except (TypeError, ValueError):
+        pass
     if uid in _verified:
         return True
     try:
