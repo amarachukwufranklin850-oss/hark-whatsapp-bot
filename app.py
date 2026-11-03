@@ -378,11 +378,13 @@ if __name__ == "__main__":
 # with Telegram on startup, and enforce it only once Telegram has accepted it.
 import hashlib as _hl
 _TG_SECRET_EFF = TG_SECRET or (_hl.sha256(("tygar-webhook:" + TG_TOKEN).encode()).hexdigest()[:48] if TG_TOKEN else "")
-_TG_SECRET_ON = {"v": bool(TG_SECRET)}
+_TG_SECRET_ON = {"v": bool(TG_SECRET), "err": "", "tried": 0.0}
 
 
 def _register_tg_secret():
+    _TG_SECRET_ON["tried"] = time.time()
     if not (TG_TOKEN and _TG_SECRET_EFF) or TG_SECRET:
+        _TG_SECRET_ON["err"] = "no token" if not TG_TOKEN else ""
         return
     hook = os.environ.get("RENDER_EXTERNAL_URL", "https://hark-whatsapp-bot.onrender.com") + "/telegram"
     for _ in range(3):
@@ -393,9 +395,11 @@ def _register_tg_secret():
                 _TG_SECRET_ON["v"] = True
                 print("Telegram webhook secret registered")
                 return
-            print("setWebhook failed:", r.status_code, r.text[:200])
+            _TG_SECRET_ON["err"] = f"{r.status_code} {r.text[:150]}".replace(TG_TOKEN, "***")
+            print("setWebhook failed:", _TG_SECRET_ON["err"])
         except Exception as e:
-            print("setWebhook error:", e)
+            _TG_SECRET_ON["err"] = str(e).replace(TG_TOKEN, "***")[:150]
+            print("setWebhook error:", _TG_SECRET_ON["err"])
         time.sleep(5)
 
 
@@ -404,11 +408,15 @@ threading.Thread(target=_register_tg_secret, daemon=True).start()
 
 @app.get("/tgsecretcheck")
 def tg_secret_check():
-    return {"enforced": _TG_SECRET_ON["v"]}
+    if not _TG_SECRET_ON["v"]:
+        _register_tg_secret()
+    return {"enforced": _TG_SECRET_ON["v"], "err": _TG_SECRET_ON["err"]}
 
 
 @app.post("/telegram")
 def telegram_incoming():
+    if not _TG_SECRET_ON["v"] and time.time() - _TG_SECRET_ON["tried"] > 600:
+        threading.Thread(target=_register_tg_secret, daemon=True).start()   # worker missed startup
     if _TG_SECRET_ON["v"] and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != _TG_SECRET_EFF:
         return "forbidden", 403
     upd = request.get_json(silent=True) or {}
@@ -1102,7 +1110,8 @@ def tq(sql, args=(), fetch=False):
         for s in ["create table if not exists bot_reminders (id bigserial primary key, chat bigint, body text, due double precision, rep text default '')",
                   "create table if not exists bot_todos (id bigserial primary key, chat bigint, body text, done int default 0, ts double precision)",
                   "create table if not exists bot_verified (user_id bigint primary key, method text, granted_at double precision, clock text default '')",
-                  "create table if not exists bot_verify_shots (user_id bigint, day text, n int default 0, primary key (user_id, day))"]:
+                  "create table if not exists bot_verify_shots (user_id bigint, day text, n int default 0, primary key (user_id, day))",
+                  "create table if not exists bot_verify_lock (user_id bigint primary key, fails int default 0, level int default 0, until double precision default 0)"]:
             if not os.environ.get("DATABASE_URL"):
                 s = s.replace("bigserial primary key", "integer primary key autoincrement").replace("double precision", "real").replace("bigint", "integer")
             q(s)
@@ -1114,14 +1123,14 @@ def tq(sql, args=(), fetch=False):
 # Every Telegram user, old and new, must pass this once before any feature works. Stored in bot_verified.
 GATE_HANDLE = "hackmacos"
 GATE_URL = "https://x.com/hackmacos"
-SHOT_LIMIT = 5                    # screenshot checks per user per day (WAT day)
+SHOT_LIMIT = 5                    # failed screenshot tries before a lock (locks grow: see LOCK_STEPS)
 GATE = {}                         # user_id -> {"cap": answer, "cap_ok": ts}
 _verified = set()                 # cache of verified user ids
 NOT_VERIFIED_WEB = "Please verify in the Tygar bot first: open the bot and send /start."
 GATE_INTRO = ("\U0001F512 Quick verification before you use Tygar (one time only):\n\n"
               "1\u20e3 Solve a quick captcha.\n"
               "2\u20e3 Follow @hackmacos on X, open its profile so the button shows \"Following\", take a screenshot "
-              "with your phone's clock visible at the top, and send it here right away (within 5 minutes).\n\n"
+              "and send it here.\n\n"
               "Send the screenshot as a normal photo, not forwarded.")
 
 
@@ -1161,8 +1170,7 @@ def gate_kb(after_captcha=False):
 def gate_prompt(chat, uid):
     g = GATE.get(uid) or {}
     if g.get("cap_ok") and time.time() - g["cap_ok"] < 1800:
-        return tg_send(chat, "\u2705 Captcha done. Now send your screenshot of @hackmacos on X showing \"Following\", "
-                             "with your phone's clock visible at the top (taken in the last 5 minutes).", gate_kb(True))
+        return tg_send(chat, "\u2705 Captcha done. Now send your screenshot of @hackmacos on X showing \"Following\".", gate_kb(True))
     tg_send(chat, GATE_INTRO, gate_kb(False))
 
 
@@ -1194,6 +1202,42 @@ def gate_callback(cb, chat, uid):
     if data == "gv:shot":
         return gate_prompt(chat, uid)
     gate_prompt(chat, uid)        # any other button before verification
+
+
+LOCK_STEPS = [30, 300, 1800, 7200, 86400]   # lock after each 5 failed tries: 30 s, 5 min, 30 min, 2 h, then 24 h
+
+
+def _lock_row(uid):
+    rows = tq("select fails, level, until from bot_verify_lock where user_id=?", (uid,), fetch=True)
+    return (int(rows[0][0] or 0), int(rows[0][1] or 0), float(rows[0][2] or 0)) if rows else None
+
+
+def lock_left(uid):
+    r = _lock_row(uid)
+    return max(0, int(r[2] - time.time())) if r else 0
+
+
+def record_fail(uid):
+    """Count a failed screenshot; every 5th fail locks for a growing time. Returns (tries_left, lock_seconds)."""
+    r = _lock_row(uid) or (0, 0, 0.0)
+    fails, level = r[0] + 1, r[1]
+    lock = 0
+    if fails >= SHOT_LIMIT:
+        lock = LOCK_STEPS[min(level, len(LOCK_STEPS) - 1)]
+        fails, level = 0, level + 1
+    if _lock_row(uid):
+        tq("update bot_verify_lock set fails=?, level=?, until=? where user_id=?", (fails, level, time.time() + lock if lock else r[2], uid))
+    else:
+        tq("insert into bot_verify_lock (user_id, fails, level, until) values (?, ?, ?, ?)", (uid, fails, level, time.time() + lock if lock else 0))
+    return SHOT_LIMIT - fails, lock
+
+
+def fmt_wait(sec):
+    if sec < 60:
+        return f"{sec} seconds"
+    if sec < 3600:
+        return f"{(sec + 59) // 60} minutes"
+    return f"{(sec + 3599) // 3600} hours"
 
 
 def shots_used(uid, add=False):
@@ -1251,8 +1295,9 @@ def gate_photo(chat, uid, file_id, forwarded):
             return send_captcha(chat, uid)
         if forwarded:
             return tg_send(chat, "\u274C Forwarded photos can't be used. Take a fresh screenshot and send it directly.", gate_kb(True))
-        if shots_used(uid) >= SHOT_LIMIT:
-            return tg_send(chat, f"You've used today's {SHOT_LIMIT} screenshot tries. Please try again tomorrow.")
+        wait = lock_left(uid)
+        if wait:
+            return tg_send(chat, f"\u23F3 Too many failed tries. Please wait {fmt_wait(wait)} and try again.")
         info = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile", params={"file_id": file_id}, timeout=15).json()["result"]
         if info.get("file_size", 0) > 8_000_000:
             return tg_send(chat, "That image is too big. Please send the screenshot as a normal photo.")
@@ -1269,8 +1314,7 @@ def gate_photo(chat, uid, file_id, forwarded):
     except Exception as e:
         print("gate photo error:", e)
         return tg_send(chat, "Sorry, I couldn't check that screenshot right now. Please send it again in a minute.", gate_kb(True))
-    n = shots_used(uid, add=True)
-    left = max(0, SHOT_LIMIT - n)
+    shots_used(uid, add=True)
     handle = str(v.get("handle") or "").strip().lstrip("@").lower()
     clock = str(v.get("clock") or "").strip()
     why = None
@@ -1280,12 +1324,11 @@ def gate_photo(chat, uid, file_id, forwarded):
         why = f"this is not the @hackmacos profile" + (f" (I see @{handle})." if handle else ".")
     elif not v.get("following"):
         why = "the button doesn't show \"Following\" yet. Tap Follow on @hackmacos first."
-    elif not clock:
-        why = "I can't see your phone's clock in the status bar at the top. Take a full screenshot so the time shows."
-    elif not clock_fresh(clock):
-        why = f"the clock in your screenshot ({clock[:10]}) isn't within 5 minutes of now. Please take a fresh screenshot."
     if why:
-        return tg_send(chat, f"\u274C Not verified: {why}\nTries left today: {left}.", gate_kb(True))
+        left, lock = record_fail(uid)
+        if lock:
+            return tg_send(chat, f"\u274C Not verified: {why}\n\u23F3 That's {SHOT_LIMIT} failed tries. Wait {fmt_wait(lock)} before trying again. Each lock gets longer.", gate_kb(True))
+        return tg_send(chat, f"\u274C Not verified: {why}\nTries left before a short lock: {left}.", gate_kb(True))
     grant_verified(uid, clock)
     GATE.pop(uid, None)
     tg_send(chat, "\u2705 Verified, thank you for following @hackmacos! You now have full access to Tygar.", main_menu())
