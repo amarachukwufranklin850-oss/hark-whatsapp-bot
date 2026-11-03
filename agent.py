@@ -103,6 +103,18 @@ def _search(pg, q):
     return False
 
 
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 TygarsBot"
+HEAVY = re.compile(r"(doubleclick|googlesyndication|adservice|googletagmanager|google-analytics|facebook\.net|taboola|outbrain|"
+                   r"criteo|amazon-adsystem|adnxs|scorecardresearch|hotjar|quantserve|moatads|pubmatic|rubiconproject)", re.I)
+
+
+def _route(r):
+    rq = r.request
+    if rq.resource_type in ("media", "websocket", "font") or HEAVY.search(rq.url):
+        return r.abort()
+    return r.continue_()
+
+
 def _tg(method, **kw):
     try:
         return H["requests"].post(f"https://api.telegram.org/bot{H['token']}/{method}", timeout=30, **kw)
@@ -182,18 +194,44 @@ def _run(chat, mid, token, goal):
         with sync_playwright() as p:
             b = H["launch"](p)
             try:
-                ctx = b.new_context(viewport={"width": 1100, "height": 720}, device_scale_factor=1,
-                                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 TygarsBot")
-                ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("media", "websocket") else r.continue_())
-                pg = ctx.new_page()
-                pg.set_default_timeout(20000)
-                pg.set_default_navigation_timeout(30000)
+                state = {"b": b}
+
+                def fresh_page():
+                    """New context/page; relaunch Chromium if a heavy page crashed it (512 MB server)."""
+                    try:
+                        state["b"].contexts
+                        c = state["b"].new_context(viewport={"width": 1000, "height": 640}, device_scale_factor=1, user_agent=UA)
+                    except Exception:
+                        try:
+                            state["b"].close()
+                        except Exception:
+                            pass
+                        state["b"] = H["launch"](p)
+                        c = state["b"].new_context(viewport={"width": 1000, "height": 640}, device_scale_factor=1, user_agent=UA)
+                    c.route("**/*", _route)
+                    np = c.new_page()
+                    np.set_default_timeout(20000)
+                    np.set_default_navigation_timeout(30000)
+                    return np
+
+                pg = fresh_page()
                 _search(pg, goal)
                 live["steps"].append(f"1. \U0001F50E Searching: {goal[:60]}")
                 t0 = time.time()
                 for step in range(2, MAX_STEPS + 2):
-                    pg.wait_for_timeout(1200)
-                    frame = pg.screenshot(type="jpeg", quality=55)
+                    try:
+                        pg.wait_for_timeout(1200)
+                        frame = pg.screenshot(type="jpeg", quality=55)
+                    except Exception as e:
+                        print("agent page crashed, recovering:", str(e)[:120])
+                        live["steps"].append(f"{step}. \u26A0 That page was too heavy, going back to the results")
+                        try:
+                            pg.context.close()
+                        except Exception:
+                            pass
+                        pg = fresh_page()
+                        _search(pg, goal)
+                        continue
                     live["frame"] = frame
                     live["status"] = f"\U0001F310 On {urlparse(pg.url).hostname or ''}"
                     _update_tg(chat, mid, live, frame)
@@ -239,9 +277,15 @@ def _run(chat, mid, token, goal):
                     except Exception as e:
                         live["steps"].append(f"{step}. \u26A0 That page didn't load, trying another way")
                         print("agent step error:", str(e)[:200])
-                ctx.close()
+                try:
+                    pg.context.close()
+                except Exception:
+                    pass
             finally:
-                b.close()
+                try:
+                    state["b"].close()
+                except Exception:
+                    pass
         live["status"] = "\U0001F9E0 Writing up what I found..."
         _update_tg(chat, mid, live, None)
         msgs = [{"role": "system", "content": "Answer the user's goal using ONLY these research notes. Be concrete: names, prices, numbers. "
