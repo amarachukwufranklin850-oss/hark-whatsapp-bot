@@ -806,13 +806,19 @@ def send_voice(chat, text, caption=""):
         return False
 
 
+def bet_send(chat, text, markup=None):
+    if "18+" not in text:
+        text = text + "\n\n\U0001F51E 18+ only. Bet responsibly."
+    return tg_send(chat, text, markup)
+
+
 def telegram_reply(chat, text, reply_to_text=""):
     low0 = text.strip().lower()
     mode = take_mode(chat) if not text.startswith("/") else (pending_mode.pop(chat, None) and None)
     if mode == "betcode":
-        return betconv.reply_code(chat, text, tg_send)
+        return betconv.reply_code(chat, text, bet_send)
     if low0.startswith("/convert"):
-        return betconv.convert_cmd(chat, text, tg_send)
+        return betconv.convert_cmd(chat, text, bet_send)
     if mode == "image":
         return telegram_image_reply(chat, "/image " + text)
     if mode == "video":
@@ -831,6 +837,10 @@ def telegram_reply(chat, text, reply_to_text=""):
         return telegram_open(chat, text)
     if mode == "web":
         return telegram_open(chat, "/open " + text)
+    if low0.startswith("/privacy"):
+        return tg_send(chat, PRIVACY_TEXT)
+    if low0.startswith("/deletemydata"):
+        return delete_my_data(chat, chat)
     if low0 in ("/menu", "menu", "/help"):
         return tg_send(chat, "🐯 Tygars Bot menu. Tap what you need:", main_menu())
     if low0.startswith("/reminders") or low0 in ("my reminders", "show my reminders"):
@@ -1127,7 +1137,7 @@ SHOT_LIMIT = 5                    # failed screenshot tries before a lock (locks
 GATE = {}                         # user_id -> {"cap": answer, "cap_ok": ts}
 _verified = set()                 # cache of verified user ids
 NOT_VERIFIED_WEB = "Please verify in the Tygar bot first: open the bot and send /start."
-GATE_INTRO = ("\U0001F512 Quick verification before you use Tygar (one time only):\n\n"
+GATE_INTRO_OLD = ("\U0001F512 Quick verification before you use Tygar (one time only):\n\n"
               "1\u20e3 Solve a quick captcha.\n"
               "2\u20e3 Follow @hackmacos on X, open its profile so the button shows \"Following\", take a screenshot "
               "and send it here.\n\n"
@@ -1135,6 +1145,10 @@ GATE_INTRO = ("\U0001F512 Quick verification before you use Tygar (one time only
 
 
 DEV_IDS = {7318702964} | {int(x) for x in os.environ.get("DEV_TELEGRAM_IDS", "").replace(" ", "").split(",") if x.isdigit()}
+
+
+GATE_INTRO = ("\U0001F512 Quick check before you use Tygar (one time only): tap Start captcha and pick the right answer.\n\n"
+              "Send /privacy to see what Tygar keeps about you.")
 
 
 def is_verified(uid):
@@ -1156,26 +1170,22 @@ def is_verified(uid):
     return False
 
 
-def grant_verified(uid, clock=""):
+def grant_verified(uid, clock="", method="captcha+x_follow_screenshot"):
     try:
         tq("delete from bot_verified where user_id=?", (uid,))
         tq("insert into bot_verified (user_id, method, granted_at, clock) values (?, ?, ?, ?)",
-           (uid, "captcha+x_follow_screenshot", time.time(), clock[:20]))
+           (uid, method, time.time(), clock[:20]))
     except Exception as e:
         print("verify save error:", e)
     _verified.add(uid)
 
 
 def gate_kb(after_captcha=False):
-    rows = [[{"text": "\U0001D54F Follow @hackmacos", "url": GATE_URL}]]
-    if after_captcha:
-        rows.append([{"text": "\U0001F4F8 Send screenshot", "callback_data": "gv:shot"}])
-    else:
-        rows.append([{"text": "\U0001F9E9 Start captcha", "callback_data": "gv:cap"}])
-    return {"inline_keyboard": rows}
+    return {"inline_keyboard": [[{"text": "\U0001F9E9 Start captcha", "callback_data": "gv:cap"}]]}
 
 
 def gate_prompt(chat, uid):
+    return tg_send(chat, GATE_INTRO, gate_kb(False))
     g = GATE.get(uid) or {}
     if g.get("cap_ok") and time.time() - g["cap_ok"] < 1800:
         return tg_send(chat, "\u2705 Captcha done. Now send your screenshot of @hackmacos on X showing \"Following\".", gate_kb(True))
@@ -1203,8 +1213,11 @@ def gate_callback(cb, chat, uid):
     if data.startswith("gv:a:"):
         g = GATE.get(uid) or {}
         if g.get("cap") is not None and data[5:] == str(g["cap"]) and time.time() - g.get("cap_ts", 0) < 600:
-            GATE[uid] = {"cap_ok": time.time()}
-            return gate_prompt(chat, uid)
+            GATE.pop(uid, None)
+            grant_verified(uid, method="captcha")
+            tg_send(chat, "\u2705 Verified! You now have full access to Tygar. Tap what you need, or just ask me anything.", main_menu())
+            return tg_send(chat, "Optional: follow @hackmacos on X for updates and new features.",
+                           {"inline_keyboard": [[{"text": "\U0001D54F Follow @hackmacos", "url": GATE_URL}]]})
         tg_send(chat, "\u274C Not quite. Here's a new one.")
         return send_captcha(chat, uid)
     if data == "gv:shot":
@@ -1368,11 +1381,54 @@ def gate_intercept(upd):
         file_id = msg["photo"][-1]["file_id"]          # full size so the status-bar clock is readable
     elif (msg.get("document") or {}).get("mime_type", "").startswith("image/"):
         file_id = msg["document"]["file_id"]
-    if file_id:
-        threading.Thread(target=gate_photo, args=(chat, uid, file_id, forwarded), daemon=True).start()
+    txt = (msg.get("text") or "").strip().lower()
+    if txt.startswith("/privacy"):
+        threading.Thread(target=tg_send, args=(chat, PRIVACY_TEXT), daemon=True).start()
+    elif txt.startswith("/deletemydata"):
+        threading.Thread(target=delete_my_data, args=(chat, uid), daemon=True).start()
     else:
         threading.Thread(target=gate_prompt, args=(chat, uid), daemon=True).start()
     return True
+
+
+PRIVACY_TEXT = (
+    "\U0001F512 Tygar privacy\n\n"
+    "What Tygar keeps:\n"
+    "\u2022 Your Telegram user ID and that you passed the captcha\n"
+    "\u2022 Your last 20 messages with Tygar, so it remembers the conversation\n"
+    "\u2022 Reminders and to-do items you add\n"
+    "\u2022 How many bet codes you converted today (for the daily limit)\n\n"
+    "What it doesn't keep: photos, voice notes and files are processed and not saved. No phone numbers, passwords or bank details are ever asked for.\n\n"
+    "Who processes it: Groq (AI answers and voice notes), Render (hosting) and Neon (database). Tygar never sells your data.\n\n"
+    "Why: only to run the bot's features for you.\n\n"
+    "Delete everything: send /deletemydata. Questions: tap Speak with the developer in /menu.\n\n"
+    "Tygar is fan-made and not affiliated with Hark."
+)
+
+
+def delete_my_data(chat, uid):
+    n = 0
+    for sql, arg in [("delete from bot_reminders where chat=?", chat), ("delete from bot_todos where chat=?", chat),
+                     ("delete from bot_verified where user_id=?", uid), ("delete from bot_verify_shots where user_id=?", uid),
+                     ("delete from bot_verify_lock where user_id=?", uid)]:
+        try:
+            tq(sql, (arg,)); n += 1
+        except Exception as e:
+            print("delete error:", e)
+    try:
+        history.pop(f"tg:{chat}", None)
+        from hangout import q
+        q("delete from bot_memory where user_id=?", (f"tg:{chat}",))
+    except Exception as e:
+        try:
+            import psycopg2
+            if DB_URL:
+                with psycopg2.connect(DB_URL) as c, c.cursor() as cur:
+                    cur.execute("delete from bot_memory where user_id=%s", (f"tg:{chat}",))
+        except Exception as e2:
+            print("memory delete error:", e, e2)
+    _verified.discard(uid)
+    tg_send(chat, "\U0001F5D1 Done. Your chat memory, reminders, to-dos and verification have been deleted. Send /start to use Tygar again.")
 
 
 def wat_now():
@@ -1527,9 +1583,9 @@ def telegram_callback(cb):
     try:
         if data == "m:betconv":
             pending_mode.pop(chat, None)
-            betconv.start(chat, tg_send)
+            betconv.start(chat, bet_send)
         elif data.startswith("bc:"):
-            betconv.on_callback(chat, data, tg_send, pending_mode)
+            betconv.on_callback(chat, data, bet_send, pending_mode)
         elif data.startswith("m:"):
             k = data[2:]
             if k == "remind" and tq("select count(*) from bot_reminders where chat=?", (chat,), fetch=True)[0][0]:
