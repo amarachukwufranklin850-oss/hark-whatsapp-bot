@@ -374,9 +374,42 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
 
+# Webhook secret: use TELEGRAM_SECRET if set, else derive one from the bot token. Register it
+# with Telegram on startup, and enforce it only once Telegram has accepted it.
+import hashlib as _hl
+_TG_SECRET_EFF = TG_SECRET or (_hl.sha256(("tygar-webhook:" + TG_TOKEN).encode()).hexdigest()[:48] if TG_TOKEN else "")
+_TG_SECRET_ON = {"v": bool(TG_SECRET)}
+
+
+def _register_tg_secret():
+    if not (TG_TOKEN and _TG_SECRET_EFF) or TG_SECRET:
+        return
+    hook = os.environ.get("RENDER_EXTERNAL_URL", "https://hark-whatsapp-bot.onrender.com") + "/telegram"
+    for _ in range(3):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/setWebhook",
+                              data={"url": hook, "secret_token": _TG_SECRET_EFF}, timeout=20)
+            if r.ok and r.json().get("ok"):
+                _TG_SECRET_ON["v"] = True
+                print("Telegram webhook secret registered")
+                return
+            print("setWebhook failed:", r.status_code, r.text[:200])
+        except Exception as e:
+            print("setWebhook error:", e)
+        time.sleep(5)
+
+
+threading.Thread(target=_register_tg_secret, daemon=True).start()
+
+
+@app.get("/tgsecretcheck")
+def tg_secret_check():
+    return {"enforced": _TG_SECRET_ON["v"]}
+
+
 @app.post("/telegram")
 def telegram_incoming():
-    if TG_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TG_SECRET:
+    if _TG_SECRET_ON["v"] and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != _TG_SECRET_EFF:
         return "forbidden", 403
     upd = request.get_json(silent=True) or {}
     if gate_intercept(upd):          # not verified yet: only the verification flow runs
