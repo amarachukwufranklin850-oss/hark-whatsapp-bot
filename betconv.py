@@ -17,7 +17,7 @@ ALLOWED = ("sportybet.com", "football.com", "bet9ja.com", "1xbet.ng", "1xbet.com
            "msport.com", "betway.com.ng", "betway.com.gh", "betway.co.za", "betwayafrica.com", "nairabet.com",
            "betwinner.ng", "betwinner.com", "merrybet.com", "bangbet.com", "betano.ng", "22bet.ng", "22bet.com",
            "paripesa.ng", "melbet.ng", "betika.com", "hollywoodbets.net", "supabets.co.za", "sportingbet.co.za",
-           "gbets.co.za", "soccabet.com")
+           "gbets.co.za", "soccabet.com", "stake.com")
 
 # Reachability checks run by /betcheck from the server. "*_load" checks read a real booking code (VESTC6, a
 # SportyBet-family code) or an invalid one (msport answers "The code is invalid." as JSON = endpoint works).
@@ -48,6 +48,8 @@ CHECKS = {
     "supabets": "https://www.supabets.co.za/",
     "sportingbet_za": "https://www.sportingbet.co.za/",
     "gbets": "https://www.gbets.co.za/",
+    "stake_home": "https://stake.com/",
+    "stake_api": "https://stake.com/_api/graphql",
 }
 
 
@@ -122,7 +124,8 @@ def probe():
 
 # ======================= converter =======================
 # Bookies in the Betradar family share event ids (sr:match:...) and market ids, so picks move 1:1.
-COUNTRIES = (("ng", "\U0001F1F3\U0001F1EC Nigeria"), ("gh", "\U0001F1EC\U0001F1ED Ghana"), ("za", "\U0001F1FF\U0001F1E6 South Africa"))
+COUNTRIES = (("ng", "\U0001F1F3\U0001F1EC Nigeria"), ("gh", "\U0001F1EC\U0001F1ED Ghana"), ("za", "\U0001F1FF\U0001F1E6 South Africa"),
+             ("int", "\U0001F30D International"))
 BOOKIES = {  # key: (label, status, country)  status "ok" = loads and books codes from our Render server; anything else = coming soon
     # Nigeria
     "sportybet": ("SportyBet NG", "ok", "ng"),
@@ -153,6 +156,8 @@ BOOKIES = {  # key: (label, status, country)  status "ok" = loads and books code
     "supabets": ("Supabets", "soon", "za"),
     "sportingbet": ("Sportingbet ZA", "soon", "za"),
     "gbets": ("Gbets", "soon", "za"),
+    # International
+    "stake": ("Stake", "soon", "int"),
 }
 ALIASES = {"sporty": "sportybet", "sb": "sportybet", "sportybetng": "sportybet", "sportyng": "sportybet",
            "footballcom": "football", "football.com": "football", "fc": "football",
