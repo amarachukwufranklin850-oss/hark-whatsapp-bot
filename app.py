@@ -420,6 +420,7 @@ def telegram_incoming():
     if _TG_SECRET_ON["v"] and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != _TG_SECRET_EFF:
         return "forbidden", 403
     upd = request.get_json(silent=True) or {}
+    threading.Thread(target=track_update, args=(upd,), daemon=True).start()
     if gate_intercept(upd):          # not verified yet: only the verification flow runs
         return "ok", 200
     if upd.get("callback_query"):
@@ -837,6 +838,9 @@ def telegram_reply(chat, text, reply_to_text=""):
         return telegram_open(chat, text)
     if mode == "web":
         return telegram_open(chat, "/open " + text)
+    if low0.startswith("/stats"):
+        if int(chat) in DEV_IDS:
+            return tg_send(chat, stats_text())
     if low0.startswith("/privacy"):
         return tg_send(chat, PRIVACY_TEXT)
     if low0.startswith("/deletemydata"):
@@ -1121,7 +1125,10 @@ def tq(sql, args=(), fetch=False):
                   "create table if not exists bot_todos (id bigserial primary key, chat bigint, body text, done int default 0, ts double precision)",
                   "create table if not exists bot_verified (user_id bigint primary key, method text, granted_at double precision, clock text default '')",
                   "create table if not exists bot_verify_shots (user_id bigint, day text, n int default 0, primary key (user_id, day))",
-                  "create table if not exists bot_verify_lock (user_id bigint primary key, fails int default 0, level int default 0, until double precision default 0)"]:
+                  "create table if not exists bot_verify_lock (user_id bigint primary key, fails int default 0, level int default 0, until double precision default 0)",
+                  "create table if not exists bot_users (user_id bigint primary key, first_seen double precision, last_seen double precision, lang text default '')",
+                  "create table if not exists bot_daily (user_id bigint, day text, msgs int default 0, primary key (user_id, day))",
+                  "create table if not exists bot_feature (day text, feature text, n int default 0, primary key (day, feature))"]:
             if not os.environ.get("DATABASE_URL"):
                 s = s.replace("bigserial primary key", "integer primary key autoincrement").replace("double precision", "real").replace("bigint", "integer")
             q(s)
@@ -1397,7 +1404,8 @@ PRIVACY_TEXT = (
     "\u2022 Your Telegram user ID and that you passed the captcha\n"
     "\u2022 Your last 20 messages with Tygar, so it remembers the conversation\n"
     "\u2022 Reminders and to-do items you add\n"
-    "\u2022 How many bet codes you converted today (for the daily limit)\n\n"
+    "\u2022 How many bet codes you converted today (for the daily limit)\n"
+    "\u2022 Which days you used Tygar and how many messages you sent (usage counts only, not the messages)\n\n"
     "What it doesn't keep: photos, voice notes and files are processed and not saved. No phone numbers, passwords or bank details are ever asked for.\n\n"
     "Who processes it: Groq (AI answers and voice notes), Render (hosting) and Neon (database). Tygar never sells your data.\n\n"
     "Why: only to run the bot's features for you.\n\n"
@@ -1410,7 +1418,8 @@ def delete_my_data(chat, uid):
     n = 0
     for sql, arg in [("delete from bot_reminders where chat=?", chat), ("delete from bot_todos where chat=?", chat),
                      ("delete from bot_verified where user_id=?", uid), ("delete from bot_verify_shots where user_id=?", uid),
-                     ("delete from bot_verify_lock where user_id=?", uid)]:
+                     ("delete from bot_verify_lock where user_id=?", uid), ("delete from bot_users where user_id=?", uid),
+                     ("delete from bot_daily where user_id=?", uid)]:
         try:
             tq(sql, (arg,)); n += 1
         except Exception as e:
@@ -1429,6 +1438,99 @@ def delete_my_data(chat, uid):
             print("memory delete error:", e, e2)
     _verified.discard(uid)
     tg_send(chat, "\U0001F5D1 Done. Your chat memory, reminders, to-dos and verification have been deleted. Send /start to use Tygar again.")
+
+
+def wat_day(offset_days=0):
+    import datetime
+    return (datetime.datetime.utcfromtimestamp(time.time() + WAT) - datetime.timedelta(days=offset_days)).strftime("%Y-%m-%d")
+
+
+def bump_feature(feature):
+    try:
+        tq("insert into bot_feature (day, feature, n) values (?, ?, 1) on conflict (day, feature) do update set n = bot_feature.n + 1",
+           (wat_day(), feature[:30]))
+    except Exception as e:
+        print("feature stat error:", e)
+
+
+def track_update(upd):
+    """Record who used Tygar and when (Telegram user ID, day, message count, features) for the developer /stats."""
+    try:
+        cb = upd.get("callback_query")
+        msg = upd.get("message") or {}
+        frm = (cb or msg).get("from") or {}
+        uid = frm.get("id")
+        if not uid:
+            return
+        now = time.time()
+        tq("insert into bot_users (user_id, first_seen, last_seen, lang) values (?, ?, ?, ?) "
+           "on conflict (user_id) do update set last_seen = excluded.last_seen", (uid, now, now, (frm.get("language_code") or "")[:8]))
+        tq("insert into bot_daily (user_id, day, msgs) values (?, ?, 1) on conflict (user_id, day) do update set msgs = bot_daily.msgs + 1",
+           (uid, wat_day()))
+        if cb and (cb.get("data") or "").startswith("m:"):
+            bump_feature(cb["data"][2:])
+        t = (msg.get("text") or "").strip()
+        if t.startswith("/"):
+            bump_feature(t.split()[0].split("@")[0].lower())
+        elif msg.get("voice"):
+            bump_feature("voice note")
+        elif msg.get("photo"):
+            bump_feature("photo")
+        elif t:
+            bump_feature("chat")
+    except Exception as e:
+        print("track error:", e)
+
+
+def stats_text():
+    def one(sql, args=()):
+        try:
+            r = tq(sql, args, fetch=True)
+            return (r[0][0] if r and r[0][0] is not None else 0)
+        except Exception as e:
+            print("stats error:", e)
+            return "?"
+    now = time.time()
+    d0, d6, d29 = wat_day(), wat_day(6), wat_day(29)
+    dau = one("select count(*) from bot_daily where day=?", (d0,))
+    yday = one("select count(*) from bot_daily where day=?", (wat_day(1),))
+    wau = one("select count(distinct user_id) from bot_daily where day>=?", (d6,))
+    mau = one("select count(distinct user_id) from bot_daily where day>=?", (d29,))
+    total = one("select count(*) from bot_users")
+    new1 = one("select count(*) from bot_users where first_seen>=?", (now - 86400,))
+    new7 = one("select count(*) from bot_users where first_seen>=?", (now - 7 * 86400,))
+    new30 = one("select count(*) from bot_users where first_seen>=?", (now - 30 * 86400,))
+    ver = one("select count(*) from bot_verified")
+    ver1 = one("select count(*) from bot_verified where granted_at>=?", (now - 86400,))
+    mem = one("select count(*) from bot_memory where user_id like 'tg:%'")
+    msgs = one("select sum(msgs) from bot_daily where day=?", (d0,))
+    msgs30 = one("select sum(msgs) from bot_daily where day>=?", (d29,))
+    rem = one("select count(*) from bot_reminders")
+    todo = one("select count(*) from bot_todos where done=0")
+    try:
+        feats = tq("select feature, sum(n) from bot_feature where day>=? group by feature order by sum(n) desc limit 8", (d6,), fetch=True) or []
+    except Exception:
+        feats = []
+    try:
+        days = tq("select day, count(*) from bot_daily where day>=? group by day order by day", (d6,), fetch=True) or []
+    except Exception:
+        days = []
+    lines = ["\U0001F4CA Tygar stats (WAT)", "",
+             f"Active today: {dau} (yesterday {yday})",
+             f"Active last 7 days: {wau}",
+             f"Active last 30 days: {mau}", "",
+             f"Total users: {total}",
+             f"New: {new1} today, {new7} this week, {new30} this month",
+             f"Verified: {ver} ({ver1} in last 24 h)",
+             f"Users with chat memory (all time): {mem}", "",
+             f"Messages today: {msgs or 0}, last 30 days: {msgs30 or 0}",
+             f"Active reminders: {rem}, open to-dos: {todo}"]
+    if days:
+        lines += ["", "Daily active, last 7 days:"] + [f"{d[5:]}: {n}" for d, n in days]
+    if feats:
+        lines += ["", "Top features this week:"] + [f"{f}: {n}" for f, n in feats]
+    lines += ["", "Counting started 2 Nov 2026, so older days show 0."]
+    return "\n".join(lines)
 
 
 def wat_now():
