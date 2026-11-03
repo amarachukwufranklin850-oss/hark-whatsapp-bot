@@ -2017,7 +2017,7 @@ def keep_awake():
 
 threading.Thread(target=keep_awake, daemon=True).start()
 betconv.init(_launch, ensure_browser, _pw_lock)
-agent.init(send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, lock=_pw_lock, launch=_launch,
+agent.init(send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, model=MODEL, lock=_pw_lock, launch=_launch,
            ensure_browser=ensure_browser, safe_url=safe_url, dev_ids=DEV_IDS,
            base_url=BROWSE_URL.rsplit("/browse", 1)[0],
            placeholder=lambda: open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg"), "rb").read())

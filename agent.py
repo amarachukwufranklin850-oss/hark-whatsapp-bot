@@ -115,7 +115,8 @@ def _route(r):
     return r.continue_()
 
 
-AGENT_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+AGENT_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
+LAST_ERR = [""]
 
 
 def _llm(msgs, json_mode=True, limit=45):
@@ -126,17 +127,21 @@ def _llm(msgs, json_mode=True, limit=45):
         body = {"model": model, "messages": msgs, "max_tokens": 700, "temperature": 0.2}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        if model.startswith("openai/"):
+            body["reasoning_effort"] = "low"
+            body["max_tokens"] = 1500
         r = H["requests"].post("https://api.groq.com/openai/v1/chat/completions", timeout=(10, 35),
                                headers={"Authorization": f"Bearer {H['groq_key']}"}, json=body)
         if r.status_code >= 300:
             raise RuntimeError(f"groq {r.status_code}: {r.text[:200]}")
         return r.json()["choices"][0]["message"].get("content") or ""
 
-    for model in AGENT_MODELS:
+    for model in ([H.get("model")] if H.get("model") and H.get("model") not in AGENT_MODELS else []) + AGENT_MODELS:
         ex = cf.ThreadPoolExecutor(max_workers=1)
         try:
             return ex.submit(call, model).result(timeout=limit)
         except Exception as e:
+            LAST_ERR[0] = f"{model}: {type(e).__name__} {str(e)[:150]}"
             print("agent llm", model, "failed:", str(e)[:200])
         finally:
             ex.shutdown(wait=False)
@@ -373,7 +378,8 @@ def live_state(token):
     if not v["done"] and time.time() - v["ts"] > 480:
         v["status"] = "\u26A0 This task took too long and was stopped."
     return {"goal": v["goal"], "steps": v["steps"], "status": v["status"], "done": v["done"], "n": len(v["steps"]),
-            "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", "")}
+            "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", ""),
+            "llm_err": re.sub(r"(gsk_|Bearer )\S+", "***", LAST_ERR[0])[:200]}
 
 
 @bp.get("/live/<token>/frame.jpg")
