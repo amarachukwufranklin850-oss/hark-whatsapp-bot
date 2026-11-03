@@ -13,28 +13,47 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 
 # Bookie domains the probe may touch (nothing else).
-ALLOWED = ("sportybet.com", "football.com", "bet9ja.com", "1xbet.ng", "1xbet.com", "betking.com",
-           "msport.com", "betway.com.ng", "nairabet.com", "betwinner.ng", "betwinner.com", "merrybet.com")
+ALLOWED = ("sportybet.com", "football.com", "bet9ja.com", "1xbet.ng", "1xbet.com", "1xbet.com.gh", "betking.com",
+           "msport.com", "betway.com.ng", "betway.com.gh", "betway.co.za", "betwayafrica.com", "nairabet.com",
+           "betwinner.ng", "betwinner.com", "merrybet.com", "bangbet.com", "betano.ng", "22bet.ng", "22bet.com",
+           "paripesa.ng", "melbet.ng", "betika.com", "hollywoodbets.net", "supabets.co.za", "sportingbet.co.za",
+           "gbets.co.za", "soccabet.com")
 
+# Reachability checks run by /betcheck from the server. "*_load" checks read a real booking code (VESTC6, a
+# SportyBet-family code) or an invalid one (msport answers "The code is invalid." as JSON = endpoint works).
 CHECKS = {
-    "sportybet": "https://www.sportybet.com/api/ng/orders/share/VESTC6",
-    "football": "https://www.football.com/api/ng/orders/share/VESTC6",
+    "sportybet_ng_load": "https://www.sportybet.com/api/ng/orders/share/VESTC6",
+    "sportybet_gh_load": "https://www.sportybet.com/api/gh/orders/share/VESTC6",
+    "sportybet_za_load": "https://www.sportybet.com/api/za/orders/share/VESTC6",
+    "football_load": "https://www.football.com/api/ng/orders/share/VESTC6",
+    "msport_ng_load": "https://www.msport.com/api/ng/orders/real-sports/order/share/ABC123",
+    "msport_gh_load": "https://www.msport.com/api/gh/orders/real-sports/order/share/ABC123",
     "bet9ja_coupon": "https://coupon.bet9ja.com/desktop/feapi/CouponAjax/GetBookABetCoupon?couponCode=5Y8SWSW&v_cache_version=1.328.0.248",
-    "bet9ja_sports": "https://sports.bet9ja.com/desktop/feapi/PalimpsestAjax/GetSports?DISP=0&v_cache_version=1.328.0.248",
-    "bet9ja_apigw": "https://apigw.bet9ja.com/",
-    "1xbet": "https://1xbet.ng/LineFeed/Get1x2_VZip?sports=1&count=1&lng=en&mode=4",
-    "betking": "https://www.betking.com/api/sports/v1/bet/Booked/ABC123/en",
-    "msport": "https://www.msport.com/api/ng/facts-center/query/frontend/sport-list",
-    "betway": "https://www.betway.com.ng/",
-    "nairabet": "https://www.nairabet.com/",
+    "1xbet_ng": "https://1xbet.ng/LineFeed/Get1x2_VZip?sports=1&count=1&lng=en&mode=4",
+    "betking": "https://www.betking.com/",
+    "betway_ng": "https://www.betway.com.ng/",
+    "betway_gh": "https://www.betway.com.gh/",
+    "betway_za": "https://www.betway.co.za/",
+    "nairabet": "https://nairabet.com/",
     "betwinner": "https://betwinner.ng/",
     "merrybet": "https://www.merrybet.com/",
+    "bangbet": "https://www.bangbet.com/",
+    "betano_ng": "https://www.betano.ng/",
+    "22bet_ng": "https://22bet.ng/",
+    "paripesa_ng": "https://paripesa.ng/",
+    "melbet_ng": "https://melbet.ng/",
+    "betika_gh": "https://www.betika.com/en-gh/",
+    "soccabet_gh": "https://www.soccabet.com/",
+    "hollywoodbets": "https://www.hollywoodbets.net/",
+    "supabets": "https://www.supabets.co.za/",
+    "sportingbet_za": "https://www.sportingbet.co.za/",
+    "gbets": "https://www.gbets.co.za/",
 }
 
 
 def hdrs(url, extra=None):
     host = re.match(r"https?://([^/]+)", url).group(1)
-    base = ".".join(host.split(".")[-2:]) if not host.endswith(".com.ng") else ".".join(host.split(".")[-3:])
+    base = ".".join(host.split(".")[-3:]) if re.search(r"\.(com|co)\.(ng|gh|za)$", host) else ".".join(host.split(".")[-2:])
     h = {"User-Agent": UA, "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
          "Referer": f"https://www.{base}/", "Origin": f"https://www.{base}"}
     if "bet9ja" in host:
@@ -52,19 +71,24 @@ def _allowed(url):
 _probe_hits = []
 
 
+def _check_one(u):
+    t = time.time()
+    try:
+        r = requests.get(u, headers=hdrs(u), timeout=12, allow_redirects=True)
+        return {"status": r.status_code, "ms": int((time.time() - t) * 1000),
+                "json": r.text.lstrip()[:1] in "{[", "preview": r.text[:160]}
+    except Exception as e:
+        return {"status": 0, "error": str(e)[:160]}
+
+
 @bp.get("/betcheck")
 def betcheck():
     """Can this server reach each bookie? Returns status codes and a short body preview only."""
-    out = {}
-    for k, u in CHECKS.items():
-        t = time.time()
-        try:
-            r = requests.get(u, headers=hdrs(u), timeout=15, allow_redirects=True)
-            out[k] = {"status": r.status_code, "ms": int((time.time() - t) * 1000),
-                      "json": r.text.lstrip()[:1] in "{[", "preview": r.text[:160]}
-        except Exception as e:
-            out[k] = {"status": 0, "error": str(e)[:160]}
-    return out
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        res = dict(zip(CHECKS, ex.map(_check_one, CHECKS.values())))
+    res["_bookies"] = {k: {"label": v[0], "status": v[1], "country": v[2]} for k, v in BOOKIES.items()}
+    return res
 
 
 @bp.route("/betcheck/probe", methods=["GET", "POST"])
@@ -98,20 +122,44 @@ def probe():
 
 # ======================= converter =======================
 # Bookies in the Betradar family share event ids (sr:match:...) and market ids, so picks move 1:1.
-BOOKIES = {  # key: (label, status)  status: "ok" works from our server; anything else is shown as coming soon
-    "sportybet": ("SportyBet", "ok"),
-    "msport": ("MSport", "ok"),
-    "football": ("Football.com", "ok"),
-    "bet9ja": ("Bet9ja", "blocked"),
-    "1xbet": ("1xBet", "soon"),
-    "betking": ("BetKing", "blocked"),
-    "betway": ("Betway", "soon"),
-    "nairabet": ("Nairabet", "blocked"),
-    "betwinner": ("BetWinner", "soon"),
-    "merrybet": ("Merrybet", "soon"),
+COUNTRIES = (("ng", "\U0001F1F3\U0001F1EC Nigeria"), ("gh", "\U0001F1EC\U0001F1ED Ghana"), ("za", "\U0001F1FF\U0001F1E6 South Africa"))
+BOOKIES = {  # key: (label, status, country)  status "ok" = loads and books codes from our Render server; anything else = coming soon
+    # Nigeria
+    "sportybet": ("SportyBet NG", "ok", "ng"),
+    "msport": ("MSport NG", "ok", "ng"),
+    "football": ("Football.com", "ok", "ng"),
+    "bet9ja": ("Bet9ja", "blocked", "ng"),
+    "betking": ("BetKing", "blocked", "ng"),
+    "1xbet": ("1xBet", "soon", "ng"),
+    "betway": ("Betway NG", "soon", "ng"),
+    "nairabet": ("Nairabet", "soon", "ng"),
+    "betwinner": ("BetWinner", "soon", "ng"),
+    "merrybet": ("Merrybet", "soon", "ng"),
+    "bangbet": ("Bangbet", "soon", "ng"),
+    "betano": ("Betano", "soon", "ng"),
+    "22bet": ("22Bet", "soon", "ng"),
+    "paripesa": ("Paripesa", "soon", "ng"),
+    "melbet": ("Melbet", "soon", "ng"),
+    # Ghana
+    "sportybet_gh": ("SportyBet GH", "ok", "gh"),
+    "msport_gh": ("MSport GH", "ok", "gh"),
+    "betway_gh": ("Betway GH", "soon", "gh"),
+    "betika_gh": ("Betika GH", "soon", "gh"),
+    "soccabet": ("Soccabet", "soon", "gh"),
+    # South Africa
+    "sportybet_za": ("SportyBet ZA", "ok", "za"),
+    "betway_za": ("Betway ZA", "soon", "za"),
+    "hollywoodbets": ("Hollywoodbets", "soon", "za"),
+    "supabets": ("Supabets", "soon", "za"),
+    "sportingbet": ("Sportingbet ZA", "soon", "za"),
+    "gbets": ("Gbets", "soon", "za"),
 }
-ALIASES = {"sporty": "sportybet", "sb": "sportybet", "footballcom": "football", "football.com": "football", "fc": "football",
-           "ms": "msport", "b9ja": "bet9ja", "bet9": "bet9ja", "1x": "1xbet", "onexbet": "1xbet"}
+ALIASES = {"sporty": "sportybet", "sb": "sportybet", "sportybetng": "sportybet", "sportyng": "sportybet",
+           "footballcom": "football", "football.com": "football", "fc": "football",
+           "ms": "msport", "msportng": "msport", "b9ja": "bet9ja", "bet9": "bet9ja", "1x": "1xbet", "onexbet": "1xbet",
+           "sportybetgh": "sportybet_gh", "sportygh": "sportybet_gh", "sportybetza": "sportybet_za", "sportyza": "sportybet_za",
+           "msportgh": "msport_gh", "betwayng": "betway", "betwaygh": "betway_gh", "betwayza": "betway_za",
+           "betika": "betika_gh", "sportingbetza": "sportingbet"}
 DAILY_LIMIT = 15
 RESP = "18+ only. Bet responsibly, never stake money you can't afford to lose."
 STATE = {}      # chat -> {"from": key, "to": key}
@@ -134,7 +182,7 @@ def label(k):
 
 def norm_bookie(s):
     s = (s or "").strip().lower().replace(" ", "")
-    s = ALIASES.get(s, s)
+    s = ALIASES.get(s, ALIASES.get(s.replace("_", ""), s))
     return s if s in BOOKIES else None
 
 
@@ -286,8 +334,12 @@ def http(method, url, body=None):
 
 # ---------- load / create per bookie ----------
 SHARE = {"sportybet": "https://www.sportybet.com/api/ng/orders/share",
+         "sportybet_gh": "https://www.sportybet.com/api/gh/orders/share",
+         "sportybet_za": "https://www.sportybet.com/api/za/orders/share",
          "football": "https://www.football.com/api/ng/orders/share",
-         "msport": "https://www.msport.com/api/ng/orders/real-sports/order/share"}
+         "msport": "https://www.msport.com/api/ng/orders/real-sports/order/share",
+         "msport_gh": "https://www.msport.com/api/gh/orders/real-sports/order/share"}
+SPORTY_FAMILY = ("sportybet", "sportybet_gh", "sportybet_za", "football")  # same API shape; msport* is the other shape
 
 
 class BetError(Exception):
@@ -298,7 +350,7 @@ def load_code(bookie, code):
     """Returns list of picks: dict(eventId, marketId, specifier, outcomeId, game, market, pick, odds, started)."""
     j = http("GET", f"{SHARE[bookie]}/{code}")
     msg = (j.get("message") or "")
-    if bookie in ("sportybet", "football"):
+    if bookie in SPORTY_FAMILY:
         if j.get("bizCode") != 10000 or not j.get("data"):
             raise BetError(msg or "That code could not be loaded.")
         data = j["data"]
@@ -424,17 +476,24 @@ def format_result(r, code, src, dst):
 
 # ---------- Telegram flow ----------
 def _kb(exclude=None, step="f"):
-    btns = []
-    for k in working():
-        if k != exclude:
-            btns.append({"text": label(k), "callback_data": f"bc:{step}:{k}"})
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    """Picker grouped by country: a header button per country, then that country's working bookies."""
+    rows = []
+    for c, cname in COUNTRIES:
+        btns = [{"text": label(k), "callback_data": f"bc:{step}:{k}"} for k in working() if k != exclude and BOOKIES[k][2] == c]
+        if not btns:
+            continue
+        rows.append([{"text": cname, "callback_data": f"bc:h:{c}"}])
+        rows += [btns[i:i + 2] for i in range(0, len(btns), 2)]
     return {"inline_keyboard": rows}
 
 
 def soon_text():
-    s = [label(k) for k, v in BOOKIES.items() if v[1] != "ok"]
-    return "Coming soon: " + ", ".join(s) + "."
+    parts = []
+    for c, cname in COUNTRIES:
+        s = [label(k) for k, v in BOOKIES.items() if v[1] != "ok" and v[2] == c]
+        if s:
+            parts.append(f"{cname.split(' ', 1)[1]}: " + ", ".join(s))
+    return "Coming soon \u2014 " + "; ".join(parts) + "."
 
 
 def start(chat, send):
@@ -444,6 +503,8 @@ def start(chat, send):
 
 def on_callback(chat, data, send, pending_mode):
     _, step, k = data.split(":", 2)
+    if step == "h":
+        return  # country header button, nothing to do
     if k not in working():
         return send(chat, f"{label(k)} isn't available yet. " + soon_text())
     if step == "f":
@@ -500,7 +561,7 @@ def convert_cmd(chat, text, send):
     parts = text.split()
     if len(parts) < 4:
         names = ", ".join(k for k in working())
-        return send(chat, f"Use: /convert CODE FROM TO\ne.g. /convert VESTC6 sportybet msport\nWorking bookies: {names}\nOr tap the Bet code converter button in /menu.")
+        return send(chat, f"Use: /convert CODE FROM TO\ne.g. /convert VESTC6 sportybet msport_gh\nWorking bookies: {names}\nOr tap the Bet code converter button in /menu.")
     src, dst = norm_bookie(parts[2]), norm_bookie(parts[3])
     if not src or not dst:
         return send(chat, "I don't know that bookie. Working now: " + ", ".join(working()))

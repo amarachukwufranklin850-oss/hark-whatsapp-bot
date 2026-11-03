@@ -379,6 +379,8 @@ def telegram_incoming():
     if TG_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TG_SECRET:
         return "forbidden", 403
     upd = request.get_json(silent=True) or {}
+    if gate_intercept(upd):          # not verified yet: only the verification flow runs
+        return "ok", 200
     if upd.get("callback_query"):
         threading.Thread(target=telegram_callback, args=(upd["callback_query"],), daemon=True).start()
         return "ok", 200
@@ -988,6 +990,8 @@ def chat_api():
     uid = tg_user_from_init(d.get("initData", ""))
     if not uid:
         return {"reply": "Please open Tygars Chat from inside the Telegram bot."}, 403
+    if not is_verified(uid):
+        return {"reply": NOT_VERIFIED_WEB}, 403
     text = (d.get("text") or "").strip()[:2000]
     if not text:
         return {"reply": ""}
@@ -1009,6 +1013,8 @@ def voice_api():
     uid = tg_user_from_init(request.form.get("initData", ""))
     if not uid:
         return {"reply": "Please open Tygars Chat from inside the Telegram bot."}, 403
+    if not is_verified(uid):
+        return {"reply": NOT_VERIFIED_WEB}, 403
     f = request.files.get("audio")
     if not f:
         return {"reply": "No audio received."}, 400
@@ -1035,7 +1041,8 @@ def voice_api():
 def tts_api():
     import base64
     d = request.get_json(silent=True) or {}
-    if not tg_user_from_init(d.get("initData", "")):
+    tuid = tg_user_from_init(d.get("initData", ""))
+    if not tuid or not is_verified(tuid):
         return {}, 403
     try:
         return {"audio": base64.b64encode(tts_mp3((d.get("text") or "")[:1500])).decode()}
@@ -1060,12 +1067,228 @@ def tq(sql, args=(), fetch=False):
     from hangout import q
     if not getattr(tq, "ready", False):
         for s in ["create table if not exists bot_reminders (id bigserial primary key, chat bigint, body text, due double precision, rep text default '')",
-                  "create table if not exists bot_todos (id bigserial primary key, chat bigint, body text, done int default 0, ts double precision)"]:
+                  "create table if not exists bot_todos (id bigserial primary key, chat bigint, body text, done int default 0, ts double precision)",
+                  "create table if not exists bot_verified (user_id bigint primary key, method text, granted_at double precision, clock text default '')",
+                  "create table if not exists bot_verify_shots (user_id bigint, day text, n int default 0, primary key (user_id, day))"]:
             if not os.environ.get("DATABASE_URL"):
                 s = s.replace("bigserial primary key", "integer primary key autoincrement").replace("double precision", "real").replace("bigint", "integer")
             q(s)
         tq.ready = True
     return q(sql, args, fetch=fetch)
+
+
+# ---------- verification gate (captcha + screenshot of following @hackmacos on X) ----------
+# Every Telegram user, old and new, must pass this once before any feature works. Stored in bot_verified.
+GATE_HANDLE = "hackmacos"
+GATE_URL = "https://x.com/hackmacos"
+SHOT_LIMIT = 5                    # screenshot checks per user per day (WAT day)
+GATE = {}                         # user_id -> {"cap": answer, "cap_ok": ts}
+_verified = set()                 # cache of verified user ids
+NOT_VERIFIED_WEB = "Please verify in the Tygar bot first: open the bot and send /start."
+GATE_INTRO = ("\U0001F512 Quick verification before you use Tygar (one time only):\n\n"
+              "1\u20e3 Solve a quick captcha.\n"
+              "2\u20e3 Follow @hackmacos on X, open its profile so the button shows \"Following\", take a screenshot "
+              "with your phone's clock visible at the top, and send it here right away (within 5 minutes).\n\n"
+              "Send the screenshot as a normal photo, not forwarded.")
+
+
+def is_verified(uid):
+    if not uid:
+        return False
+    if uid in _verified:
+        return True
+    try:
+        if tq("select 1 from bot_verified where user_id=?", (uid,), fetch=True):
+            _verified.add(uid)
+            return True
+    except Exception as e:
+        print("verify lookup error:", e)
+    return False
+
+
+def grant_verified(uid, clock=""):
+    try:
+        tq("delete from bot_verified where user_id=?", (uid,))
+        tq("insert into bot_verified (user_id, method, granted_at, clock) values (?, ?, ?, ?)",
+           (uid, "captcha+x_follow_screenshot", time.time(), clock[:20]))
+    except Exception as e:
+        print("verify save error:", e)
+    _verified.add(uid)
+
+
+def gate_kb(after_captcha=False):
+    rows = [[{"text": "\U0001D54F Follow @hackmacos", "url": GATE_URL}]]
+    if after_captcha:
+        rows.append([{"text": "\U0001F4F8 Send screenshot", "callback_data": "gv:shot"}])
+    else:
+        rows.append([{"text": "\U0001F9E9 Start captcha", "callback_data": "gv:cap"}])
+    return {"inline_keyboard": rows}
+
+
+def gate_prompt(chat, uid):
+    g = GATE.get(uid) or {}
+    if g.get("cap_ok") and time.time() - g["cap_ok"] < 1800:
+        return tg_send(chat, "\u2705 Captcha done. Now send your screenshot of @hackmacos on X showing \"Following\", "
+                             "with your phone's clock visible at the top (taken in the last 5 minutes).", gate_kb(True))
+    tg_send(chat, GATE_INTRO, gate_kb(False))
+
+
+def send_captcha(chat, uid):
+    import random
+    a, b = random.randint(2, 19), random.randint(2, 19)
+    ans = a + b
+    opts = {ans}
+    while len(opts) < 4:
+        opts.add(ans + random.choice([-3, -2, -1, 1, 2, 3, 10, -10]))
+    opts = sorted(o for o in opts if o > 0)
+    GATE[uid] = {"cap": ans, "cap_ts": time.time()}
+    tg_send(chat, f"\U0001F9E9 Captcha: what is {a} + {b}?",
+            {"inline_keyboard": [[{"text": str(o), "callback_data": f"gv:a:{o}"} for o in opts]]})
+
+
+def gate_callback(cb, chat, uid):
+    data = cb.get("data") or ""
+    requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb.get("id")}, timeout=10)
+    if data == "gv:cap":
+        return send_captcha(chat, uid)
+    if data.startswith("gv:a:"):
+        g = GATE.get(uid) or {}
+        if g.get("cap") is not None and data[5:] == str(g["cap"]) and time.time() - g.get("cap_ts", 0) < 600:
+            GATE[uid] = {"cap_ok": time.time()}
+            return gate_prompt(chat, uid)
+        tg_send(chat, "\u274C Not quite. Here's a new one.")
+        return send_captcha(chat, uid)
+    if data == "gv:shot":
+        return gate_prompt(chat, uid)
+    gate_prompt(chat, uid)        # any other button before verification
+
+
+def shots_used(uid, add=False):
+    day = time.strftime("%Y-%m-%d", time.gmtime(time.time() + WAT))
+    rows = tq("select n from bot_verify_shots where user_id=? and day=?", (uid, day), fetch=True)
+    n = rows[0][0] if rows else 0
+    if add:
+        if rows:
+            tq("update bot_verify_shots set n=? where user_id=? and day=?", (n + 1, uid, day))
+        else:
+            tq("insert into bot_verify_shots (user_id, day, n) values (?, ?, ?)", (uid, day, 1))
+        n += 1
+    return n
+
+
+def clock_fresh(clock, now=None):
+    """True if the status-bar time is within 5 minutes of now in GMT, WAT or SAST (12h clocks allowed)."""
+    m = re.search(r"(\d{1,2})\s*[:.]\s*(\d{2})\s*([ap])?\.?\s*m?", (clock or "").lower())
+    if not m:
+        return False
+    h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3)
+    if h > 23 or mi > 59:
+        return False
+    if ap:
+        h = (h % 12) + (12 if ap == "p" else 0)
+        cands = [h * 60 + mi]
+    else:
+        cands = [h * 60 + mi] + ([((h % 12) + 12) * 60 + mi, (h % 12) * 60 + mi] if h <= 12 else [])
+    now = time.time() if now is None else now
+    for off in (0, 1, 2):          # GMT, WAT, SAST
+        t = time.gmtime(now + off * 3600)
+        cur = t.tm_hour * 60 + t.tm_min
+        for c in cands:
+            d = abs(cur - c) % 1440
+            if min(d, 1440 - d) <= 5:
+                return True
+    return False
+
+
+SHOT_PROMPT = ("You are checking a verification screenshot. Answer ONLY with one JSON object, no other text:\n"
+               '{"x_profile": true/false, "handle": "the @handle of the profile shown, without @", '
+               '"following": true/false, "clock": "the time shown in the phone status bar at the very top, exactly as shown, or empty", '
+               '"reason": "one short sentence"}\n'
+               "x_profile = the image is a screenshot of an X (Twitter) profile page (app or website).\n"
+               "following = the profile's follow button clearly reads \"Following\" (meaning the viewer follows this account). "
+               "A \"Follow\" button means false. Be strict: if unsure, false.\n"
+               "clock = only the phone/computer status-bar clock; leave empty if there is no status bar or clock visible.")
+
+
+def gate_photo(chat, uid, file_id, forwarded):
+    try:
+        g = GATE.get(uid) or {}
+        if not (g.get("cap_ok") and time.time() - g["cap_ok"] < 1800):
+            tg_send(chat, "Please solve the captcha first, then send your screenshot.")
+            return send_captcha(chat, uid)
+        if forwarded:
+            return tg_send(chat, "\u274C Forwarded photos can't be used. Take a fresh screenshot and send it directly.", gate_kb(True))
+        if shots_used(uid) >= SHOT_LIMIT:
+            return tg_send(chat, f"You've used today's {SHOT_LIMIT} screenshot tries. Please try again tomorrow.")
+        info = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getFile", params={"file_id": file_id}, timeout=15).json()["result"]
+        if info.get("file_size", 0) > 8_000_000:
+            return tg_send(chat, "That image is too big. Please send the screenshot as a normal photo.")
+        img = requests.get(f"https://api.telegram.org/file/bot{TG_TOKEN}/{info['file_path']}", timeout=30).content
+        mime = "image/png" if info["file_path"].lower().endswith(".png") else "image/jpeg"
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": SHOT_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(img).decode()}"}}]}]
+        tg_send(chat, "\U0001F50D Checking your screenshot...")
+        raw = (groq(msgs, tools=False, model=VISION_MODEL).get("content") or "")
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.S)
+        m = re.search(r"\{.*\}", raw, re.S)
+        v = json.loads(m.group(0)) if m else {}
+    except Exception as e:
+        print("gate photo error:", e)
+        return tg_send(chat, "Sorry, I couldn't check that screenshot right now. Please send it again in a minute.", gate_kb(True))
+    n = shots_used(uid, add=True)
+    left = max(0, SHOT_LIMIT - n)
+    handle = str(v.get("handle") or "").strip().lstrip("@").lower()
+    clock = str(v.get("clock") or "").strip()
+    why = None
+    if not v.get("x_profile"):
+        why = "this doesn't look like an X (Twitter) profile page."
+    elif handle != GATE_HANDLE:
+        why = f"this is not the @hackmacos profile" + (f" (I see @{handle})." if handle else ".")
+    elif not v.get("following"):
+        why = "the button doesn't show \"Following\" yet. Tap Follow on @hackmacos first."
+    elif not clock:
+        why = "I can't see your phone's clock in the status bar at the top. Take a full screenshot so the time shows."
+    elif not clock_fresh(clock):
+        why = f"the clock in your screenshot ({clock[:10]}) isn't within 5 minutes of now. Please take a fresh screenshot."
+    if why:
+        return tg_send(chat, f"\u274C Not verified: {why}\nTries left today: {left}.", gate_kb(True))
+    grant_verified(uid, clock)
+    GATE.pop(uid, None)
+    tg_send(chat, "\u2705 Verified, thank you for following @hackmacos! You now have full access to Tygar.", main_menu())
+
+
+def gate_intercept(upd):
+    """Return True when the update was handled by the verification gate (user not verified yet)."""
+    cb = upd.get("callback_query")
+    if cb:
+        uid = (cb.get("from") or {}).get("id")
+        chat = ((cb.get("message") or {}).get("chat") or {}).get("id") or uid
+        if not uid or is_verified(uid):
+            return False
+        threading.Thread(target=gate_callback, args=(cb, chat, uid), daemon=True).start()
+        return True
+    msg = upd.get("message") or upd.get("edited_message")
+    if not msg:
+        return False
+    uid = (msg.get("from") or {}).get("id")
+    chat = (msg.get("chat") or {}).get("id")
+    if not uid or not chat or is_verified(uid):
+        return False
+    if upd.get("edited_message"):
+        return True
+    forwarded = bool(msg.get("forward_origin") or msg.get("forward_date") or msg.get("forward_from")
+                     or msg.get("forward_from_chat") or msg.get("forward_sender_name"))
+    file_id = None
+    if msg.get("photo"):
+        file_id = msg["photo"][-1]["file_id"]          # full size so the status-bar clock is readable
+    elif (msg.get("document") or {}).get("mime_type", "").startswith("image/"):
+        file_id = msg["document"]["file_id"]
+    if file_id:
+        threading.Thread(target=gate_photo, args=(chat, uid, file_id, forwarded), daemon=True).start()
+    else:
+        threading.Thread(target=gate_prompt, args=(chat, uid), daemon=True).start()
+    return True
 
 
 def wat_now():
@@ -1546,3 +1769,13 @@ def keep_awake():
 
 threading.Thread(target=keep_awake, daemon=True).start()
 betconv.init(_launch, ensure_browser, _pw_lock)
+
+
+@app.get("/gatecheck")
+def gatecheck():
+    """Is the verification gate's table reachable? Returns only a count, no user data."""
+    try:
+        n = tq("select count(*) from bot_verified", fetch=True)[0][0]
+        return {"gate": "on", "table_ok": True, "verified_users": n, "shot_limit": SHOT_LIMIT}
+    except Exception as e:
+        return {"gate": "on", "table_ok": False, "error": type(e).__name__}
