@@ -1491,6 +1491,9 @@ def todo_cmd(chat, text):
             {"inline_keyboard": kb})
 
 
+DEV_WA_URL = "https://wa.me/2349162737819?text=" + requests.utils.quote("Hi, I'm messaging from Tygar Bot on Telegram. I have a suggestion:")
+
+
 def main_menu():
     rows = [[{"text": "\U0001F5BC Image search", "callback_data": "m:image"}, {"text": "\U0001F3AC Photo video", "callback_data": "m:video"}],
             [{"text": "\U0001F50A Text to speech", "callback_data": "m:tts"}, {"text": "\U0001F3A4 Speech to text", "callback_data": "m:stt"}],
@@ -1499,6 +1502,7 @@ def main_menu():
             [{"text": "\U0001F5A5 Open a website", "callback_data": "m:web"}, {"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}],
             [{"text": "\U0001F3AB Bet code converter", "callback_data": "m:betconv"}]]
     rows += [[{"text": f"\U0001D54F Follow {h} on X", "url": u}] for h, u in X_HANDLES]
+    rows += [[{"text": "\U0001F468\u200D\U0001F4BB Speak with the developer", "url": DEV_WA_URL}]]
     return {"inline_keyboard": rows}
 
 
