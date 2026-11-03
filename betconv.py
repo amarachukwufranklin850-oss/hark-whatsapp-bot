@@ -17,7 +17,7 @@ ALLOWED = ("sportybet.com", "football.com", "bet9ja.com", "1xbet.ng", "1xbet.com
            "msport.com", "betway.com.ng", "betway.com.gh", "betway.co.za", "betwayafrica.com", "nairabet.com",
            "betwinner.ng", "betwinner.com", "merrybet.com", "bangbet.com", "betano.ng", "22bet.ng", "22bet.com",
            "paripesa.ng", "melbet.ng", "betika.com", "hollywoodbets.net", "supabets.co.za", "sportingbet.co.za",
-           "gbets.co.za", "soccabet.com", "stake.com")
+           "gbets.co.za", "soccabet.com", "stake.com", "betpawa.ng", "betpawa.com.gh")
 
 # Reachability checks run by /betcheck from the server. "*_load" checks read a real booking code (VESTC6, a
 # SportyBet-family code) or an invalid one (msport answers "The code is invalid." as JSON = endpoint works).
@@ -28,6 +28,8 @@ CHECKS = {
     "football_load": "https://www.football.com/api/ng/orders/share/VESTC6",
     "msport_ng_load": "https://www.msport.com/api/ng/orders/real-sports/order/share/ABC123",
     "msport_gh_load": "https://www.msport.com/api/gh/orders/real-sports/order/share/ABC123",
+    "betpawa_ng_load": "https://www.betpawa.ng/api/sportsbook/v3/booking-number/ABC123",
+    "betpawa_gh_load": "https://www.betpawa.com.gh/api/sportsbook/v3/booking-number/ABC123",
     "bet9ja_coupon": "https://coupon.bet9ja.com/desktop/feapi/CouponAjax/GetBookABetCoupon?couponCode=5Y8SWSW&v_cache_version=1.328.0.248",
     "1xbet_ng": "https://1xbet.ng/LineFeed/Get1x2_VZip?sports=1&count=1&lng=en&mode=4",
     "betking": "https://www.betking.com/",
@@ -58,6 +60,8 @@ def hdrs(url, extra=None):
     base = ".".join(host.split(".")[-3:]) if re.search(r"\.(com|co)\.(ng|gh|za)$", host) else ".".join(host.split(".")[-2:])
     h = {"User-Agent": UA, "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
          "Referer": f"https://www.{base}/", "Origin": f"https://www.{base}"}
+    if "betpawa" in host:
+        h["X-Pawa-Brand"], h["X-Pawa-Language"] = ("betpawa-ghana" if host.endswith(".gh") else "betpawa-nigeria"), "en"
     if "bet9ja" in host:
         h["Referer"], h["Origin"] = "https://sports.bet9ja.com/", "https://sports.bet9ja.com"
     if extra:
@@ -131,6 +135,7 @@ BOOKIES = {  # key: (label, status, country)  status "ok" = loads and books code
     "sportybet": ("SportyBet NG", "ok", "ng"),
     "msport": ("MSport NG", "ok", "ng"),
     "football": ("Football.com", "ok", "ng"),
+    "betpawa": ("betPawa NG", "ok", "ng"),
     "bet9ja": ("Bet9ja", "blocked", "ng"),
     "betking": ("BetKing", "blocked", "ng"),
     "1xbet": ("1xBet", "soon", "ng"),
@@ -146,6 +151,7 @@ BOOKIES = {  # key: (label, status, country)  status "ok" = loads and books code
     # Ghana
     "sportybet_gh": ("SportyBet GH", "ok", "gh"),
     "msport_gh": ("MSport GH", "ok", "gh"),
+    "betpawa_gh": ("betPawa GH", "ok", "gh"),
     "betway_gh": ("Betway GH", "soon", "gh"),
     "betika_gh": ("Betika GH", "soon", "gh"),
     "soccabet": ("Soccabet", "soon", "gh"),
@@ -164,7 +170,8 @@ ALIASES = {"sporty": "sportybet", "sb": "sportybet", "sportybetng": "sportybet",
            "ms": "msport", "msportng": "msport", "b9ja": "bet9ja", "bet9": "bet9ja", "1x": "1xbet", "onexbet": "1xbet",
            "sportybetgh": "sportybet_gh", "sportygh": "sportybet_gh", "sportybetza": "sportybet_za", "sportyza": "sportybet_za",
            "msportgh": "msport_gh", "betwayng": "betway", "betwaygh": "betway_gh", "betwayza": "betway_za",
-           "betika": "betika_gh", "sportingbetza": "sportingbet"}
+           "betika": "betika_gh", "sportingbetza": "sportingbet",
+           "pawa": "betpawa", "bp": "betpawa", "betpawang": "betpawa", "pawang": "betpawa", "betpawagh": "betpawa_gh", "pawagh": "betpawa_gh"}
 DAILY_LIMIT = 15
 RESP = "18+ only. Bet responsibly, never stake money you can't afford to lose."
 STATE = {}      # chat -> {"from": key, "to": key}
@@ -343,7 +350,9 @@ SHARE = {"sportybet": "https://www.sportybet.com/api/ng/orders/share",
          "sportybet_za": "https://www.sportybet.com/api/za/orders/share",
          "football": "https://www.football.com/api/ng/orders/share",
          "msport": "https://www.msport.com/api/ng/orders/real-sports/order/share",
-         "msport_gh": "https://www.msport.com/api/gh/orders/real-sports/order/share"}
+         "msport_gh": "https://www.msport.com/api/gh/orders/real-sports/order/share",
+         "betpawa": "https://www.betpawa.ng/api/sportsbook/v3/booking-number",
+         "betpawa_gh": "https://www.betpawa.com.gh/api/sportsbook/v3/booking-number"}
 SPORTY_FAMILY = ("sportybet", "sportybet_gh", "sportybet_za", "football")  # same API shape; msport* is the other shape
 
 
@@ -353,6 +362,8 @@ class BetError(Exception):
 
 def load_code(bookie, code):
     """Returns list of picks: dict(eventId, marketId, specifier, outcomeId, game, market, pick, odds, started)."""
+    if bookie in PAWA:
+        return pawa_load(bookie, code)
     j = http("GET", f"{SHARE[bookie]}/{code}")
     msg = (j.get("message") or "")
     if bookie in SPORTY_FAMILY:
@@ -367,7 +378,9 @@ def load_code(bookie, code):
                     picks.append({"eventId": o["eventId"], "marketId": str(m["id"]), "specifier": m.get("specifier") or None,
                                   "outcomeId": str(oc["id"]), "game": f"{o.get('homeTeamName')} vs {o.get('awayTeamName')}",
                                   "market": m.get("desc") or m.get("name") or "", "pick": oc.get("desc") or "",
-                                  "odds": _f(oc.get("odds")), "started": o.get("status", 0) != 0 or o.get("matchStatus") not in (None, "Not start")})
+                                  "odds": _f(oc.get("odds")), "started": o.get("status", 0) != 0 or o.get("matchStatus") not in (None, "Not start"),
+                                  "home": o.get("homeTeamName"), "away": o.get("awayTeamName"), "start": _ms(o.get("estimateStartTime")),
+                                  "sport": (o.get("sport") or {}).get("id")})
         return picks
     # msport
     if msg.lower() != "success" or not j.get("data"):
@@ -378,7 +391,8 @@ def load_code(bookie, code):
         picks.append({"eventId": ev.get("eventId"), "marketId": str(m.get("id")), "specifier": m.get("specifiers") or None,
                       "outcomeId": str(oc.get("id")), "game": f"{ev.get('homeTeam')} vs {ev.get('awayTeam')}",
                       "market": m.get("description") or "", "pick": oc.get("description") or "",
-                      "odds": _f(oc.get("odds")), "started": ev.get("status", 0) not in (0, None)})
+                      "odds": _f(oc.get("odds")), "started": ev.get("status", 0) not in (0, None),
+                      "home": ev.get("homeTeam"), "away": ev.get("awayTeam"), "start": _ms(ev.get("startTime")), "sport": ev.get("sportId")})
     return picks
 
 
@@ -389,12 +403,23 @@ def _f(x):
         return 0.0
 
 
+def _ms(x):
+    try:
+        return int(x) / 1000.0
+    except Exception:
+        return None
+
+
 def _sel(p):
+    if p.get("dstsel"):
+        return p["dstsel"]
     return {"eventId": p["eventId"], "marketId": p["marketId"], "specifier": p["specifier"], "outcomeId": p["outcomeId"]}
 
 
 def create_code(bookie, picks):
     """Book picks on bookie. Returns code or raises BetError(message)."""
+    if bookie in PAWA:
+        return pawa_create(bookie, [p["priceId"] for p in picks])
     j = http("POST", SHARE[bookie], {"selections": [_sel(p) for p in picks]})
     code = ((j.get("data") or {}).get("shareCode"))
     if (j.get("message") or "").lower() == "success" and code:
@@ -423,6 +448,9 @@ def convert(code, src, dst):
             unmatched.append((p, "already started or finished"))
         else:
             ok.append(p)
+    if src in PAWA or dst in PAWA:
+        ok, um = translate(ok, src, dst)
+        unmatched += um
     if ok:
         try:
             create_code(dst, ok)
@@ -446,7 +474,7 @@ def convert(code, src, dst):
     except Exception:
         dst_odds = None
     return {"code": new, "src_odds": total_odds(picks), "kept_src_odds": total_odds(ok), "dst_odds": dst_odds,
-            "matched": ok, "unmatched": unmatched, "total": len(picks)}
+            "matched": ok, "unmatched": unmatched, "total": len(picks), "note": picks[0].get("_note")}
 
 
 def convert_in_browser(code, src, dst):
@@ -469,6 +497,8 @@ def format_result(r, code, src, dst):
         lines.append(f"Total odds on {label(dst)}: {r['dst_odds'] if r['dst_odds'] else 'not shown'}")
     else:
         lines.append(f"\u274C None of the {r['total']} picks could be booked on {label(dst)}, so no code was made.")
+    if r.get("note"):
+        lines.append(f"\u2139 {r['note']}")
     if r["unmatched"]:
         lines.append("\nNot moved:")
         for p, why in r["unmatched"][:25]:
@@ -642,3 +672,257 @@ def betcheck_waf():
             threading.Thread(target=_waf_diag, args=(d,), daemon=True).start()
         return {"status": "started, check again in a minute"}
     return cur
+
+
+# ======================= betPawa =======================
+# betPawa has its own event and price ids. We find the same match by its Betradar id (betPawa lists it as the
+# event's SPORTRADAR widget) or else by team names + kickoff time, then map common markets through a shared key.
+# Public JSON endpoints the betpawa.ng site itself calls (brand chosen by the X-Pawa-Brand header).
+PAWA = {"betpawa": "https://www.betpawa.ng", "betpawa_gh": "https://www.betpawa.com.gh"}
+PAWA_ERR = {"BOOKING_CODE_NOT_FOUND": "The booking code can't be found (it doesn't exist or expired).",
+            "BOOKING_CODE_INVALID": "The booking code can't be found (it doesn't exist or expired).",
+            "SPORTSBOOK_WRONG_SELECTION": "a pick is no longer available",
+            "SPORTSBOOK_DUPLICATE_EVENT_ID": "two picks are on the same match"}
+# Betradar (market id, outcome id) -> shared key. SportyBet, Football.com and MSport all use Betradar ids.
+BR = {("1", "1"): ("1x2", "1"), ("1", "2"): ("1x2", "X"), ("1", "3"): ("1x2", "2"),
+      ("10", "9"): ("dc", "1X"), ("10", "10"): ("dc", "12"), ("10", "11"): ("dc", "X2"),
+      ("18", "12"): ("ou", "over"), ("18", "13"): ("ou", "under"),
+      ("29", "74"): ("btts", "yes"), ("29", "76"): ("btts", "no"),
+      ("11", "4"): ("dnb", "1"), ("11", "5"): ("dnb", "2"),
+      ("60", "1"): ("1x2_1h", "1"), ("60", "2"): ("1x2_1h", "X"), ("60", "3"): ("1x2_1h", "2"),
+      ("68", "12"): ("ou_1h", "over"), ("68", "13"): ("ou_1h", "under")}
+BR_REV = {v: k for k, v in BR.items()}
+LINED = ("ou", "ou_1h")
+# betPawa market type id -> kind, price type id -> outcome (football)
+PW_M = {"3743": "1x2", "4693": "dc", "5000": "ou", "3795": "btts", "4703": "dnb", "3668": "1x2_1h", "4958": "ou_1h"}
+PW_O = {"3744": "1", "3745": "X", "3746": "2", "4694": "1X", "4695": "X2", "4696": "12", "5001": "over", "5002": "under",
+        "3796": "yes", "3797": "no", "4704": "1", "4705": "2", "3669": "1", "3670": "X", "3671": "2", "4959": "over", "4960": "under"}
+
+
+def _line(x):
+    try:
+        return f"{float(str(x).replace('total=', '')):g}"
+    except Exception:
+        return None
+
+
+def br_key(p):
+    k = BR.get((str(p.get("marketId")), str(p.get("outcomeId"))))
+    if not k:
+        return None
+    line = None
+    if k[0] in LINED:
+        line = _line(re.sub(r".*total=([0-9.]+).*", r"\1", p.get("specifier") or ""))
+        if not line:
+            return None
+    return (k[0], line, k[1])
+
+
+def pawa_http(bookie, method, path, body=None):
+    url = PAWA[bookie] + path
+    r = requests.request(method, url, json=body, headers=hdrs(url, {"Content-Type": "application/json"}), timeout=25)
+    try:
+        j = r.json()
+    except Exception:
+        raise RuntimeError(f"{_domain(url)} answered {r.status_code} without data")
+    if isinstance(j, dict) and j.get("error"):
+        raise BetError(PAWA_ERR.get(j["error"], j["error"]))
+    return j
+
+
+def _ts(s):
+    """betPawa startTime -> epoch seconds (ISO 8601; tolerant of other formats)."""
+    from datetime import datetime, timezone, timedelta
+    if not s:
+        return None
+    s = str(s)
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        pass
+    m = re.search(r"(\d{4}-\d\d-\d\d) (\d\d?):(\d\d) ?(AM|PM)?.*?UTC([+-]\d\d):(\d\d)", s)
+    if m:
+        h = int(m.group(2)) % 12 + (12 if m.group(4) == "PM" else 0) if m.group(4) else int(m.group(2))
+        off = int(m.group(5)) * 60 + (int(m.group(6)) if m.group(5)[0] != "-" else -int(m.group(6)))
+        d = datetime.strptime(m.group(1), "%Y-%m-%d").replace(hour=h, minute=int(m.group(3)), tzinfo=timezone(timedelta(minutes=off)))
+        return d.timestamp()
+    return None
+
+
+def _sr(ev):
+    for w in ev.get("widgets") or []:
+        if w.get("type") == "SPORTRADAR" and w.get("id"):
+            return str(w["id"])
+    return None
+
+
+def pawa_load(bookie, code):
+    j = pawa_http(bookie, "GET", f"/api/sportsbook/v3/booking-number/{code}")
+    picks = []
+    for it in j.get("items") or []:
+        ev = it.get("eventInfo") or {}
+        parts = sorted(ev.get("participants") or [], key=lambda x: x.get("position", 0))
+        home, away = (parts[0].get("name") if parts else None), (parts[1].get("name") if len(parts) > 1 else None)
+        for s in it.get("selections") or []:
+            m, si = s.get("market") or {}, s.get("selectionInfo") or {}
+            kind, out = PW_M.get(str(m.get("typeId"))), PW_O.get(str(si.get("typeId")))
+            line = _line(si.get("handicap") or m.get("formattedHandicap")) if kind in LINED else None
+            key = (kind, line, out) if kind and out and (kind not in LINED or line) and (ev.get("category") or {}).get("id") == "2" else None
+            picks.append({"eventId": str(ev.get("id")), "priceId": str(si.get("id")), "pawaEvent": str(ev.get("id")),
+                          "marketId": str(m.get("typeId")), "specifier": None, "outcomeId": str(si.get("typeId")),
+                          "game": f"{home} vs {away}", "market": m.get("displayName") or m.get("name") or "",
+                          "pick": (si.get("displayName") or si.get("name") or "").replace("{formattedHandicap}", m.get("formattedHandicap") or ""),
+                          "odds": _f((it.get("odds") or {}).get("price")) if len(it.get("selections") or []) == 1 else 0.0,
+                          "started": bool((ev.get("additionalInfo") or {}).get("live")),
+                          "home": home, "away": away, "start": _ts(ev.get("startTime")), "key": key, "sport": "pawa:" + str((ev.get("category") or {}).get("id"))})
+    missing = (j.get("originalCount") or 0) - len(j.get("items") or [])
+    if missing > 0 and picks:
+        picks[0]["_note"] = f"{missing} pick(s) in this code are no longer available on {label(bookie)}"
+    return picks
+
+
+def pawa_create(bookie, price_ids):
+    j = pawa_http(bookie, "POST", "/api/sportsbook/v3/booking-number",
+                  {"selections": {"selections": [{"type": "SINGLE", "selections": [str(x)]} for x in price_ids]}})
+    if j.get("code"):
+        return j["code"]
+    raise BetError("booking failed")
+
+
+_STOP = {"fc", "cf", "sc", "afc", "ac", "fk", "sk", "cd", "ca", "club", "de", "the", "sv", "if", "bk", "ud", "us", "as", "kv", "nk", "vfb", "vfl", "tsg", "1", "u19", "u21", "u23"}
+
+
+def _norm(n):
+    import unicodedata
+    n = unicodedata.normalize("NFKD", (n or "").lower()).encode("ascii", "ignore").decode()
+    n = re.sub(r"\butd\b", "united", re.sub(r"[^a-z0-9 ]", " ", n))
+    return [w for w in n.split() if w not in _STOP]
+
+
+def _sim(a, b):
+    from difflib import SequenceMatcher
+    ta, tb = _norm(a), _norm(b)
+    if not ta or not tb:
+        return 0.0
+    r = SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio()
+    sa, sb = set(ta), set(tb)
+    if sa <= sb or sb <= sa:
+        r = max(r, 0.85)
+    return r
+
+
+def _ev_teams(ev):
+    parts = sorted(ev.get("participants") or [], key=lambda x: x.get("position", 0))
+    if len(parts) >= 2:
+        return parts[0].get("name"), parts[1].get("name")
+    nm = (ev.get("name") or "").split(" - ", 1)
+    return (nm[0], nm[1]) if len(nm) == 2 else (None, None)
+
+
+def _search_terms(name):
+    words = [w for w in _norm(name) if len(w) >= 4]
+    out = [name] if name else []
+    out += sorted(words, key=len, reverse=True)[:2]
+    return list(dict.fromkeys(out))
+
+
+def pawa_find_event(bookie, p, cache):
+    """Find the betPawa event for a pick: Betradar id first, else team names + kickoff (within 20 minutes)."""
+    sr = (p.get("eventId") or "").split(":")[-1] if str(p.get("eventId") or "").startswith("sr:match:") else None
+    ck = (sr or p.get("game"))
+    if ck in cache:
+        return cache[ck]
+    best, best_score = None, 0.0
+    for team in (p.get("home"), p.get("away")):
+        for term in _search_terms(team):
+            try:
+                j = pawa_http(bookie, "GET", "/api/sportsbook/v3/search?" + requests.compat.urlencode({"name": term}))
+            except BetError:
+                continue
+            for ev in j.get("events") or []:
+                if (ev.get("category") or {}).get("id") not in (None, "2"):
+                    continue
+                if sr and _sr(ev) == sr:
+                    cache[ck] = ev
+                    return ev
+                h, a = _ev_teams(ev)
+                sc = min(_sim(p.get("home"), h), _sim(p.get("away"), a))
+                st, et = p.get("start"), _ts(ev.get("startTime"))
+                if st and et and abs(st - et) > 1200:
+                    continue
+                if not (st and et):
+                    sc -= 0.1
+                if sc > best_score:
+                    best, best_score = ev, sc
+            if best_score >= 0.75:
+                break
+        if best_score >= 0.75:
+            break
+    ev = best if best_score >= 0.7 else None
+    cache[ck] = ev
+    return ev
+
+
+def pawa_price(bookie, ev_id, key, cache):
+    ck = ("ev", ev_id)
+    if ck not in cache:
+        cache[ck] = pawa_http(bookie, "GET", f"/api/sportsbook/v4/events/{ev_id}")
+    ev = cache[ck]
+    kind, line, out = key
+    for m in ev.get("markets") or []:
+        if PW_M.get(str((m.get("marketType") or {}).get("id"))) != kind:
+            continue
+        for row in m.get("row") or []:
+            for pr in row.get("prices") or []:
+                if PW_O.get(str(pr.get("typeId"))) != out:
+                    continue
+                if kind in LINED and _line((row.get("specifier") or {}).get("total") or pr.get("handicap")) != line:
+                    continue
+                if pr.get("suspended"):
+                    return None, "suspended right now"
+                return pr, None
+    return None, "market or line not offered"
+
+
+def translate(picks, src, dst):
+    """Rewrite picks so create_code(dst, ...) can book them. Returns (ok, unmatched)."""
+    ok, um, cache = [], [], {}
+    for p in picks:
+        try:
+            if src in PAWA and dst in PAWA:
+                ok.append(p)
+            elif dst in PAWA:
+                key = br_key(p)
+                if not key or p.get("sport") not in (None, "sr:sport:1"):
+                    um.append((p, f"market not supported for {label(dst)} yet"))
+                    continue
+                ev = pawa_find_event(dst, p, cache)
+                if not ev:
+                    um.append((p, f"match not found on {label(dst)}"))
+                    continue
+                pr, why = pawa_price(dst, ev["id"], key, cache)
+                if not pr:
+                    um.append((p, f"{why} on {label(dst)}"))
+                    continue
+                q = dict(p, priceId=str(pr["id"]), dst_odds=_f(pr.get("odds")))
+                ok.append(q)
+            else:  # betPawa -> Betradar family (SportyBet / Football.com / MSport)
+                key = p.get("key")
+                if not key:
+                    um.append((p, f"market not supported for {label(dst)} yet"))
+                    continue
+                ck = ("ev", p["pawaEvent"])
+                if ck not in cache:
+                    cache[ck] = pawa_http(src, "GET", f"/api/sportsbook/v4/events/{p['pawaEvent']}")
+                sr = _sr(cache[ck])
+                if not sr:
+                    um.append((p, f"match not found on {label(dst)}"))
+                    continue
+                mk, oc = BR_REV[(key[0], key[2])]
+                ok.append(dict(p, dstsel={"eventId": f"sr:match:{sr}", "marketId": mk,
+                                          "specifier": f"total={key[1]}" if key[0] in LINED else None, "outcomeId": oc}))
+        except BetError as e:
+            um.append((p, str(e)))
+        except Exception as e:
+            um.append((p, f"could not check on {label(dst)} ({str(e)[:60]})"))
+    return ok, um
