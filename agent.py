@@ -63,7 +63,7 @@ def _json(text):
 
 def _page_state(pg):
     title = (pg.title() or "")[:120]
-    text = pg.evaluate("document.body ? document.body.innerText : ''")[:3500]
+    text = pg.evaluate("document.body ? document.body.innerText : ''")[:2500]
     links = pg.evaluate("""() => {
         const seen = new Set(); const out = [];
         for (const a of document.querySelectorAll('a[href^="http"]')) {
@@ -71,7 +71,7 @@ def _page_state(pg):
             const t = (a.innerText || a.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ').slice(0, 70);
             if (t.length < 3 || seen.has(a.href) || r.width < 2 || r.height < 2) continue;
             seen.add(a.href); out.push([t, a.href]);
-            if (out.length >= 30) break;
+            if (out.length >= 25) break;
         }
         return out; }""")
     links = [(t, h) for t, h in links if not BLOCK_WORDS.search(h)]
@@ -113,6 +113,34 @@ def _route(r):
     if rq.resource_type in ("media", "websocket", "font") or HEAVY.search(rq.url):
         return r.abort()
     return r.continue_()
+
+
+AGENT_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+
+def _llm(msgs, json_mode=True, limit=45):
+    """Fast Groq call with a hard time limit, so a slow model never freezes the agent."""
+    import concurrent.futures as cf
+
+    def call(model):
+        body = {"model": model, "messages": msgs, "max_tokens": 700, "temperature": 0.2}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        r = H["requests"].post("https://api.groq.com/openai/v1/chat/completions", timeout=(10, 35),
+                               headers={"Authorization": f"Bearer {H['groq_key']}"}, json=body)
+        if r.status_code >= 300:
+            raise RuntimeError(f"groq {r.status_code}: {r.text[:200]}")
+        return r.json()["choices"][0]["message"].get("content") or ""
+
+    for model in AGENT_MODELS:
+        ex = cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            return ex.submit(call, model).result(timeout=limit)
+        except Exception as e:
+            print("agent llm", model, "failed:", str(e)[:200])
+        finally:
+            ex.shutdown(wait=False)
+    return ""
 
 
 def _tg(method, **kw):
@@ -246,7 +274,7 @@ def _run(chat, mid, token, goal):
                              f"\n\nURL: {pg.url}\nTitle: {title}\nText:\n{text}\n\nLinks:\n{numbered}"}]
                     print("agent step", step, pg.url[:80], len(links), "links")
                     try:
-                        d = _json(H["groq"](msgs, tools=False).get("content")) or {}
+                        d = _json(_llm(msgs)) or {}
                     except Exception as e:
                         print("agent llm error:", e)
                         d = {}
@@ -292,7 +320,7 @@ def _run(chat, mid, token, goal):
                                               "Plain text, short, no markdown tables. Say if something couldn't be confirmed. End with the main source links."},
                 {"role": "user", "content": f"Goal: {goal}\n\nNotes:\n" + ("\n".join(notes) or "(no useful notes)")}]
         try:
-            answer = re.sub(r"<think>.*?</think>", "", H["groq"](msgs, tools=False).get("content") or "", flags=re.S).strip()
+            answer = re.sub(r"<think>.*?</think>", "", _llm(msgs, json_mode=False, limit=60), flags=re.S).strip()
         except Exception as e:
             print("agent final error:", e)
         live["status"] = "\u2705 Done"
