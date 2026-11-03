@@ -84,6 +84,25 @@ def _ok_url(u):
     return H["safe_url"](u)
 
 
+ENGINES = ["https://www.bing.com/search?setlang=en&cc=NG&q=", "https://www.mojeek.com/search?q="]
+
+
+def _search(pg, q):
+    """Open a results page; fall back to the next engine when one blocks the browser."""
+    for base in ENGINES:
+        try:
+            pg.goto(base + quote_plus(q), wait_until="domcontentloaded", timeout=25000)
+            pg.wait_for_timeout(1200)
+            host = urlparse(base).hostname
+            n = pg.evaluate("h => [...document.querySelectorAll('a[href^=\"http\"]')].filter(a => !a.href.includes(h) || a.href.includes('/ck/a')).length", host)
+            if n >= 5:
+                return True
+            print("agent search: few results on", host, n)
+        except Exception as e:
+            print("agent search error:", base, str(e)[:150])
+    return False
+
+
 def _tg(method, **kw):
     try:
         return H["requests"].post(f"https://api.telegram.org/bot{H['token']}/{method}", timeout=30, **kw)
@@ -167,7 +186,9 @@ def _run(chat, mid, token, goal):
                                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 TygarsBot")
                 ctx.route("**/*", lambda r: r.abort() if r.request.resource_type in ("media", "websocket") else r.continue_())
                 pg = ctx.new_page()
-                pg.goto("https://html.duckduckgo.com/html/?q=" + quote_plus(goal), wait_until="domcontentloaded", timeout=30000)
+                pg.set_default_timeout(20000)
+                pg.set_default_navigation_timeout(30000)
+                _search(pg, goal)
                 live["steps"].append(f"1. \U0001F50E Searching: {goal[:60]}")
                 t0 = time.time()
                 for step in range(2, MAX_STEPS + 2):
@@ -178,11 +199,14 @@ def _run(chat, mid, token, goal):
                     _update_tg(chat, mid, live, frame)
                     if time.time() - t0 > TIME_LIMIT:
                         break
+                    live["phase"] = f"reading page {step}"
                     title, text, links = _page_state(pg)
+                    live["phase"] = f"thinking {step}"
                     numbered = "\n".join(f"[{i}] {t}" for i, (t, h) in enumerate(links))
                     msgs = [{"role": "system", "content": SYSTEM},
                             {"role": "user", "content": f"Goal: {goal}\nStep {step} of {MAX_STEPS + 1}.\nNotes so far:\n" + ("\n".join(notes) or "(none)") +
                              f"\n\nURL: {pg.url}\nTitle: {title}\nText:\n{text}\n\nLinks:\n{numbered}"}]
+                    print("agent step", step, pg.url[:80], len(links), "links")
                     try:
                         d = _json(H["groq"](msgs, tools=False).get("content")) or {}
                     except Exception as e:
@@ -190,12 +214,13 @@ def _run(chat, mid, token, goal):
                         d = {}
                     if d.get("note"):
                         notes.append(f"- ({pg.url[:80]}) {str(d['note'])[:400]}")
+                    live["phase"] = f"acting {step}: {d.get('action')}"
                     act, arg = (d.get("action") or "done"), str(d.get("arg") or "").strip()
                     say = str(d.get("say") or act)[:70]
                     try:
                         if act == "search" and arg:
                             live["steps"].append(f"{step}. \U0001F50E {say}")
-                            pg.goto("https://html.duckduckgo.com/html/?q=" + quote_plus(arg), wait_until="domcontentloaded", timeout=30000)
+                            _search(pg, arg)
                         elif act == "goto" and _ok_url(arg):
                             live["steps"].append(f"{step}. \U0001F517 {say}")
                             pg.goto(_ok_url(arg), wait_until="domcontentloaded", timeout=30000)
@@ -273,8 +298,10 @@ def live_state(token):
     v = LIVE.get(token)
     if not v:
         return {"gone": True}
+    if not v["done"] and time.time() - v["ts"] > 480:
+        v["status"] = "\u26A0 This task took too long and was stopped."
     return {"goal": v["goal"], "steps": v["steps"], "status": v["status"], "done": v["done"], "n": len(v["steps"]),
-            "answer": v.get("answer", "") if v["done"] else ""}
+            "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", "")}
 
 
 @bp.get("/live/<token>/frame.jpg")
