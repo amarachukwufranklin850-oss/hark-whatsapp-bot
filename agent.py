@@ -118,7 +118,7 @@ def _route(r):
     return r.continue_()
 
 
-AGENT_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
+AGENT_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
 LAST_ERR = [""]
 
 
@@ -253,6 +253,7 @@ def _run(chat, mid, token, goal):
 
                 pg = fresh_page()
                 _search(pg, goal)
+                history = [pg.url]
                 live["steps"].append(f"1. \U0001F50E Searching: {goal[:60]}")
                 t0 = time.time()
                 for step in range(2, MAX_STEPS + 2):
@@ -282,13 +283,16 @@ def _run(chat, mid, token, goal):
                             {"role": "user", "content": f"Goal: {goal}\nStep {step} of {MAX_STEPS + 1}.\nYour actions so far:\n" + "\n".join(live["steps"][-6:]) + "\nNotes so far:\n" + ("\n".join(notes) or "(none)") +
                              f"\n\nURL: {pg.url}\nTitle: {title}\nText:\n{text}\n\nLinks:\n{numbered}"}]
                     print("agent step", step, pg.url[:80], len(links), "links")
-                    # Freeze the page while the AI thinks: on the free server Chromium's scripts eat the CPU
-                    cdp = None
+                    # Close the page while the AI thinks: the 512 MB free server has no room for both
+                    cur_url = pg.url
                     try:
-                        cdp = pg.context.new_cdp_session(pg)
-                        cdp.send("Page.setWebLifecycleState", {"state": "frozen"})
-                    except Exception as e:
-                        print("agent freeze failed:", str(e)[:100])
+                        cur_y = pg.evaluate("window.scrollY") or 0
+                    except Exception:
+                        cur_y = 0
+                    try:
+                        pg.context.close()
+                    except Exception:
+                        pass
                     t1 = time.time()
                     try:
                         d = _json(_llm(msgs)) or {}
@@ -296,12 +300,7 @@ def _run(chat, mid, token, goal):
                         print("agent llm error:", e)
                         d = {}
                     live["llm_s"] = round(time.time() - t1, 1)
-                    try:
-                        if cdp:
-                            cdp.send("Page.setWebLifecycleState", {"state": "active"})
-                            cdp.detach()
-                    except Exception:
-                        pass
+                    pg = fresh_page()
                     if d.get("note"):
                         notes.append(f"- ({pg.url[:80]}) {str(d['note'])[:400]}")
                     live["phase"] = f"acting {step}: {d.get('action')}"
@@ -319,13 +318,22 @@ def _run(chat, mid, token, goal):
                             pg.goto(_ok_url(links[int(arg)][1]), wait_until="domcontentloaded", timeout=30000)
                         elif act == "scroll":
                             live["steps"].append(f"{step}. \u2B07 {say}")
-                            pg.mouse.wheel(0, 650)
+                            pg.goto(cur_url, wait_until="domcontentloaded", timeout=30000)
+                            pg.wait_for_timeout(800)
+                            pg.evaluate("y => window.scrollTo(0, y)", cur_y + 650)
                         elif act == "back":
                             live["steps"].append(f"{step}. \u21A9 {say}")
-                            pg.go_back(wait_until="domcontentloaded", timeout=20000)
+                            prev = history[-2] if len(history) > 1 else None
+                            if prev:
+                                history.pop()
+                                pg.goto(prev, wait_until="domcontentloaded", timeout=30000)
+                            else:
+                                _search(pg, goal)
                         else:
                             live["steps"].append(f"{step}. \u2705 {say}")
                             break
+                        if act in ("search", "goto", "click"):
+                            history.append(pg.url)
                     except Exception as e:
                         live["steps"].append(f"{step}. \u26A0 That page didn't load, trying another way")
                         print("agent step error:", str(e)[:200])
