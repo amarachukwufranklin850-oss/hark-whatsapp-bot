@@ -19,7 +19,7 @@ TIME_LIMIT = 300
 # Flip to True before an upload/deploy to lock the whole web app behind an
 # "Updating..." screen; flip back to False in the same commit that ships the
 # finished change. While True, pages show the lock and all APIs return 503.
-UPDATING = True
+UPDATING = False
 _MAINT_OK = {"/agent/logo.png", "/agent/favicon.png", "/favicon.ico",
              "/agent/manifest.json", "/agent/icon-192.png", "/agent/icon-512.png",
              "/agent/sw.js", "/.well-known/assetlinks.json"}
@@ -73,6 +73,128 @@ Prefer reliable sites. Finish with done as soon as your notes answer the goal (u
 
 def init(**helpers):
     H.update(helpers)
+
+
+# ---------- Web push reminders for the to-do list ----------
+import os as _os
+
+_PUSH = {"pem": None, "pub": None, "ready": False}
+_push_started = [False]
+PUSH_SUB = "mailto:harkbotofficial@gmail.com"
+
+
+def _pq(sql, args=(), fetch=False):
+    from hangout import q
+    if not _os.environ.get("DATABASE_URL"):
+        sql = (sql.replace("bigserial primary key", "integer primary key autoincrement")
+                  .replace("double precision", "real"))
+    return q(sql, args, fetch=fetch)
+
+
+def _push_init():
+    if _PUSH["ready"]:
+        return
+    try:
+        _pq("create table if not exists tygar_settings (k text primary key, v text)")
+        _pq("create table if not exists tygar_reminders (id bigserial primary key, sub text, task text, "
+            "due double precision, sent int default 0, created double precision)")
+    except Exception as e:
+        print("push table err:", e)
+        return
+    try:
+        row = _pq("select v from tygar_settings where k='vapid'", fetch=True)
+        if row:
+            d = json.loads(row[0][0])
+            _PUSH["pem"], _PUSH["pub"] = d["pem"], d["pub"]
+            _PUSH["ready"] = True
+            return
+    except Exception as e:
+        print("push load err:", e)
+    try:
+        import base64
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import serialization
+        priv = ec.generate_private_key(ec.SECP256R1())
+        pem = priv.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                 serialization.NoEncryption()).decode()
+        raw = priv.public_key().public_bytes(serialization.Encoding.X962,
+                                              serialization.PublicFormat.UncompressedPoint)
+        pub = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+        _pq("insert into tygar_settings (k, v) values ('vapid', ?) "
+            "on conflict (k) do update set v=excluded.v", (json.dumps({"pem": pem, "pub": pub}),))
+        _PUSH["pem"], _PUSH["pub"], _PUSH["ready"] = pem, pub, True
+    except Exception as e:
+        print("push keygen err:", e)
+
+
+def _push_send(sub_json, title, body, tag=None):
+    from pywebpush import webpush
+    from py_vapid import Vapid
+    vp = Vapid.from_pem(_PUSH["pem"].encode())
+    webpush(subscription_info=json.loads(sub_json),
+            data=json.dumps({"title": title, "body": body, "tag": tag or ""}),
+            vapid_private_key=vp, vapid_claims={"sub": PUSH_SUB})
+
+
+def _push_loop():
+    time.sleep(15)
+    _push_init()
+    while True:
+        try:
+            now = time.time()
+            rows = _pq("select id, sub, task from tygar_reminders where sent=0 and due<=? and due>?",
+                       (now, now - 6 * 3600), fetch=True) or []
+            for rid, sub, task in rows:
+                claimed = _pq("update tygar_reminders set sent=1 where id=? and sent=0 returning id",
+                              (rid,), fetch=True)
+                if not claimed:
+                    continue
+                try:
+                    _push_send(sub, "\u23F0 Tygar reminder", task, tag="rem" + str(rid))
+                except Exception as e:
+                    print("push send err:", e)
+            _pq("delete from tygar_reminders where sent=1 and due<?", (now - 3 * 86400,))
+        except Exception as e:
+            print("push loop err:", e)
+        time.sleep(30)
+
+
+def _push_start():
+    if _push_started[0]:
+        return
+    _push_started[0] = True
+    threading.Thread(target=_push_loop, daemon=True).start()
+
+
+_push_start()
+
+
+@bp.get("/agent/push/key")
+def push_key():
+    if not _PUSH["ready"]:
+        _push_init()
+    return Response(json.dumps({"key": _PUSH["pub"] or ""}), mimetype="application/json")
+
+
+@bp.post("/agent/push/remind")
+def push_remind():
+    d = request.get_json(silent=True) or {}
+    sub = d.get("sub")
+    task = (d.get("task") or "").strip()[:200]
+    due = d.get("due")
+    if not sub or not task or due is None:
+        return Response('{"error":"missing"}', status=400, mimetype="application/json")
+    try:
+        due = float(due)
+    except Exception:
+        return Response('{"error":"bad time"}', status=400, mimetype="application/json")
+    try:
+        rid = _pq("insert into tygar_reminders (sub, task, due, created) values (?,?,?,?) returning id",
+                  (json.dumps(sub), task, due, time.time()), fetch=True)
+        return Response(json.dumps({"id": (rid[0][0] if rid else 1)}), mimetype="application/json")
+    except Exception as e:
+        print("remind save err:", e)
+        return Response('{"error":"save failed"}', status=500, mimetype="application/json")
 
 
 def _day():
@@ -970,7 +1092,10 @@ AGENT_MANIFEST = {"name": "Tygar - free AI buddy for Africa", "short_name": "Tyg
 AGENT_SW = """const C='tygar-v1';self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(C).then(c=>c.addAll(['/agent','/agent/logo.png','/agent/icon-192.png'])));});
 self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch',e=>{const r=e.request;if(r.method!=='GET')return;const u=new URL(r.url);
-if(u.pathname==='/agent'){e.respondWith(fetch(r).then(x=>{const y=x.clone();caches.open(C).then(c=>c.put('/agent',y));return x;}).catch(()=>caches.match('/agent')));}});"""
+if(u.pathname==='/agent'){e.respondWith(fetch(r).then(x=>{if(x.ok){const y=x.clone();caches.open(C).then(c=>c.put('/agent',y));}return x;}).catch(()=>caches.match('/agent')));}});
+self.addEventListener('push',e=>{let d={};try{d=e.data.json();}catch(x){d={title:'Tygar',body:(e.data&&e.data.text())||'Reminder'};}
+e.waitUntil(self.registration.showNotification(d.title||'Tygar reminder',{body:d.body||'',icon:'/agent/icon-192.png',badge:'/agent/icon-192.png',tag:d.tag||('t'+Date.now()),data:{url:'/agent'},vibrate:[120,60,120]}));});
+self.addEventListener('notificationclick',e=>{e.notification.close();e.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(ls=>{for(const c of ls){if(c.url.includes('/agent')&&'focus'in c)return c.focus();}return clients.openWindow('/agent');}));});"""
 
 
 @bp.get("/agent/manifest.json")
@@ -1180,7 +1305,8 @@ footer{font-size:12px;opacity:.85;margin:10px 0 0;text-align:center;line-height:
 <div id="ans"></div>
 <div id="share"><span>Share:</span><a id="sx" target="_blank" rel="noopener">X</a><a id="sw" target="_blank" rel="noopener">WhatsApp</a><a id="sf" target="_blank" rel="noopener">Facebook</a><a href="#" id="cp">Copy</a></div></div></div>
 <div class="card" id="todo"><h2>\u2705 My to-do</h2><p class="sub">Saved on this phone only.</p>
-<form id="tf"><input id="ti" placeholder="Add a task..." maxlength="200" autocomplete="off"><button>Add</button></form><ul id="tl"></ul></div>
+<form id="tf"><input id="ti" placeholder="Add a task..." maxlength="200" autocomplete="off"><button>Add</button></form><ul id="tl"></ul>
+<input id="rt" type="datetime-local" style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none"><div id="rmsg" style="font-size:13px;color:#5a4f7a;margin-top:6px"></div></div>
 <h3 class="more">More from Tygar</h3>
 <div class="feats"><a href="#agentcard" class="feat f1"><div class="ic">\U0001F50E</div><b>Live Agent</b><small>Watch it search</small></a>
 <a href="#chat" class="feat f2"><div class="ic">\U0001F4AC</div><b>Chat</b><small>Ask anything</small></a>
@@ -1250,9 +1376,28 @@ $('ib2').onclick=async()=>{if(!DP)return;DP.prompt();await DP.userChoice;DP=null
 window.addEventListener('appinstalled',()=>{$('inst').style.display='none';});
 let TD=JSON.parse(localStorage.getItem('ta_todo')||'[]');
 function rtd(){localStorage.setItem('ta_todo',JSON.stringify(TD));$('tl').innerHTML='';TD.forEach((x,i)=>{const li=document.createElement('li');if(x.d)li.className='d';
-li.innerHTML='<i>'+(x.d?'\u2705':'\u2B1C')+'</i><span></span><i>\U0001F5D1</i>';li.querySelector('span').textContent=x.t;
-li.children[0].onclick=()=>{x.d=!x.d;rtd();};li.children[2].onclick=()=>{TD.splice(i,1);rtd();};$('tl').appendChild(li);});}
+li.innerHTML='<i>'+(x.d?'\u2705':'\u2B1C')+'</i><span></span><i title="Remind me">'+(x.r?'\u23F0':'\U0001F514')+'</i><i title="Delete">\U0001F5D1</i>';
+li.querySelector('span').textContent=x.t+(x.r&&x.rt?(' \u00b7 '+new Date(x.rt).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})):'');
+li.children[0].onclick=()=>{x.d=!x.d;rtd();};li.children[2].onclick=()=>pickRem(i);li.children[3].onclick=()=>{TD.splice(i,1);rtd();};$('tl').appendChild(li);});}
 rtd();$('tf').onsubmit=e=>{e.preventDefault();const t=$('ti').value.trim();if(t){TD.push({t,d:false});$('ti').value='';rtd();}};
+function ub64(s){const p='='.repeat((4-s.length%4)%4);const b=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));const a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a;}
+async function ensurePush(){if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window))throw 'Reminders need Chrome on Android, or installing the app.';
+const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
+if(!sub){const perm=await Notification.requestPermission();if(perm!=='granted')throw 'Tap Allow so Tygar can remind you.';
+const k=await (await fetch('/agent/push/key')).json();if(!k.key)throw 'Reminders are not ready yet, try again shortly.';
+sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:ub64(k.key)});}
+return sub.toJSON?sub.toJSON():sub;}
+let REMI=-1;
+function pickRem(i){REMI=i;const d=new Date(Date.now()+3600000-new Date().getTimezoneOffset()*60000);$('rt').value=d.toISOString().slice(0,16);
+try{if($('rt').showPicker)$('rt').showPicker();else $('rt').click();}catch(e){$('rt').click();}}
+$('rt').onchange=async()=>{const v=$('rt').value,i=REMI;if(i<0||!v)return;const due=Date.parse(v)/1000;
+if(!due||due*1000<Date.now()){$('rmsg').textContent='Pick a future time.';return;}
+$('rmsg').textContent='Setting reminder\u2026';
+try{const sub=await ensurePush();
+const r=await (await fetch('/agent/push/remind',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sub,task:TD[i].t,due})})).json();
+if(r.id){TD[i].r=r.id;TD[i].rt=v;rtd();$('rmsg').textContent='\u23F0 Reminder set. You\\'ll get a Chrome notification then, even if the app is closed.';}
+else $('rmsg').textContent='Could not set that reminder.';
+}catch(e){$('rmsg').textContent=(typeof e==='string'?e:'Could not set that reminder.');}};
 /* shop finder */
 let ME=null,MAP=null,YOU=null,SHOP=null,LINE=null,WID=null,TGT=null;
 function km(a,b,c,d){const R=6371,r=Math.PI/180,x=Math.sin((c-a)*r/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin((d-b)*r/2)**2;return 2*R*Math.asin(Math.sqrt(x));}

@@ -6,3 +6,5 @@ edge-tts
 psycopg2-binary
 imageio-ffmpeg
 playwright
+pywebpush
+cryptography
