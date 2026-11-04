@@ -796,40 +796,71 @@ setTimeout(tick,1500);}tick();</script></body></html>"""
 
 APP_HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tygar Agent</title><link rel="icon" href="/agent/favicon.png"><meta property="og:image" content="/agent/logo.png"><style>
-*{box-sizing:border-box}body{margin:0;min-height:100vh;color:#f2f2ff;font-family:system-ui,sans-serif;
-background:linear-gradient(#0b0820d9,#0b0820e6),url(/agent/logo.png) center 120px/min(90vw,560px) no-repeat fixed,radial-gradient(circle at 10% 0%,#7b2ff7 0,transparent 40%),radial-gradient(circle at 95% 10%,#f107a3 0,transparent 38%),radial-gradient(circle at 50% 100%,#00c2ff 0,transparent 45%),#0b0820}
-.logo.sm{width:34px;height:34px;margin-right:6px}#chat .sub{margin:4px 0 8px}
-.logo{width:54px;height:54px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 18px #f107a3;vertical-align:middle;margin-right:10px}
-h1 .grad{background:linear-gradient(90deg,#ffd200,#ff5e62,#c86dd7,#00e0ff);-webkit-background-clip:text;background-clip:text;color:transparent}
-.wrap{max-width:920px;margin:0 auto;padding:16px}
-h1{font-size:22px;margin:6px 0 2px}.sub{color:#9aa;font-size:14px;margin:0 0 14px}
-form{display:flex;gap:8px}input{flex:1;padding:13px;border-radius:10px;border:1px solid #7b2ff7;background:#120d30;color:#fff;font-size:16px}
-button{padding:0 18px;border:0;border-radius:10px;background:linear-gradient(90deg,#ff5e62,#ff9966);color:#fff;font-weight:800;font-size:15px;box-shadow:0 4px 14px #ff5e6266;cursor:pointer}
-button:disabled{opacity:.5}.chips{margin:10px 0 4px;display:flex;flex-wrap:wrap;gap:6px}
-.chip{font-size:13px;padding:7px 12px;border-radius:20px;color:#fff;cursor:pointer;background:#ffffff1a;border:1px solid #ffffff40}
-.chip:nth-child(1){background:#00c2ff33;border-color:#00c2ff}.chip:nth-child(2){background:#2ecc7133;border-color:#2ecc71}.chip:nth-child(3){background:#ffd20033;border-color:#ffd200}
-#err{color:#ff7b7b;font-size:14px;margin-top:8px}
-#run{display:none;margin-top:16px}.bar{display:flex;align-items:center;gap:8px;font-size:14px}
-.dot{width:9px;height:9px;border-radius:50%;background:#e33;animation:b 1s infinite}.done .dot{background:#2c2;animation:none}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;min-height:100vh;color:#1d1240;font-family:"Segoe UI",system-ui,sans-serif;font-size:18px;line-height:1.5;
+background:linear-gradient(135deg,#fff3c4,#ffd6e8 35%,#d9e8ff 70%,#d6fff1);background-size:300% 300%;animation:bg 18s ease infinite}
+@keyframes bg{0%,100%{background-position:0 50%}50%{background-position:100% 50%}}
+body::before{content:"";position:fixed;inset:0;background:url(/agent/logo.png) center 55%/min(80vw,620px) no-repeat;opacity:.07;pointer-events:none;z-index:0}
+.wrap{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:18px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+h1{font-size:34px;margin:6px 0;font-weight:900;display:flex;align-items:center}
+.logo{width:64px;height:64px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 4px #ff3d7f,0 8px 22px #ff3d7f66;margin-right:12px;animation:pop 3s ease-in-out infinite}
+@keyframes pop{50%{transform:scale(1.06) rotate(-3deg)}}
+.logo.sm{width:44px;height:44px;margin-right:10px;box-shadow:0 0 0 3px #7b2ff7;animation:none}
+.grad{background:linear-gradient(90deg,#ff3d7f,#ff8a00,#7b2ff7,#00a8e8);background-size:200%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sh 6s linear infinite}
+@keyframes sh{to{background-position:200% 0}}
+#acct{font-size:16px;font-weight:700}#acct a{color:#fff;background:#7b2ff7;padding:8px 16px;border-radius:30px;text-decoration:none;box-shadow:0 4px 12px #7b2ff755}
+.hero{background:linear-gradient(120deg,#ff3d7f,#ff8a00);color:#fff;border-radius:22px;padding:22px;margin:14px 0 18px;box-shadow:0 12px 30px #ff3d7f44}
+.hero h2{font-size:28px;margin:0 0 6px;font-weight:900}.hero p{margin:0;font-size:18px;opacity:.95}
+.badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.badges span{background:#ffffff33;border:1px solid #ffffff88;padding:5px 12px;border-radius:20px;font-size:15px;font-weight:700}
+.feats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 20px}@media(max-width:760px){.feats{grid-template-columns:repeat(2,1fr)}}
+.feat{background:#fff;border-radius:18px;padding:14px;text-align:center;box-shadow:0 6px 18px #7b2ff722;border-top:6px solid var(--c);transition:transform .2s}
+.feat:hover{transform:translateY(-4px)}.feat b{display:block;font-size:19px;margin-top:4px}.feat small{color:#5a4f7a;font-size:15px}.feat .ic{font-size:34px}
+.card{background:#ffffffee;border-radius:22px;padding:18px;box-shadow:0 10px 28px #7b2ff722;margin-bottom:20px}
+.card h2{font-size:26px;margin:0 0 4px;display:flex;align-items:center;font-weight:900}
+.sub{color:#5a4f7a;font-size:17px;margin:0 0 14px}
+form{display:flex;gap:10px}input{flex:1;padding:16px;border-radius:14px;border:3px solid #c9b6ff;background:#fff;color:#1d1240;font-size:18px;outline:none}
+input:focus{border-color:#7b2ff7;box-shadow:0 0 0 4px #7b2ff733}
+button{padding:0 24px;border:0;border-radius:14px;background:linear-gradient(90deg,#ff3d7f,#ff8a00);color:#fff;font-weight:900;font-size:18px;box-shadow:0 6px 16px #ff3d7f55;cursor:pointer;transition:transform .15s}
+button:hover{transform:scale(1.04)}button:disabled{opacity:.5}
+.chips{margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-size:15px;padding:8px 14px;border-radius:30px;color:#1d1240;cursor:pointer;background:#fff;border:2px solid #ddd;font-weight:600}
+.chip:nth-child(4n+1){background:#e0f6ff;border-color:#00a8e8}.chip:nth-child(4n+2){background:#e3ffef;border-color:#19c37d}
+.chip:nth-child(4n+3){background:#fff6d6;border-color:#ffb800}.chip:nth-child(4n+4){background:#ffe3ee;border-color:#ff3d7f}
+#err{color:#d6004c;font-size:16px;margin-top:8px;font-weight:700}
+#run{display:none;margin-top:18px}.bar{display:flex;align-items:center;gap:10px;font-size:18px}
+.dot{width:12px;height:12px;border-radius:50%;background:#ff3d7f;animation:b 1s infinite}.done .dot{background:#19c37d;animation:none}
 @keyframes b{50%{opacity:.3}}
-.grid{display:grid;grid-template-columns:1.6fr 1fr;gap:12px;margin-top:10px}@media(max-width:700px){.grid{grid-template-columns:1fr}}
-.screen{border:1px solid #2a2d36;border-radius:12px;overflow:hidden;background:#fff;color:#222}
-#view{padding:12px;min-height:220px;max-height:360px;overflow:hidden;font-size:13px;line-height:1.45}#vurl{color:#1a7f37;font-size:12px;word-break:break-all}
-#vtitle{font-size:16px;font-weight:700;margin:4px 0 6px;color:#1a0dab}#vtext{white-space:pre-wrap;color:#333}#vlinks{margin-top:8px;color:#1a0dab;font-size:12px}
-.steps{background:#1a1440cc;border:1px solid #7b2ff7;border-radius:12px;padding:10px 12px;font-size:14px;line-height:1.6}
-.steps ol{margin:0;padding:0;list-style:none}#status{color:#f5b301;margin-top:6px}
-#ans{display:none;margin-top:14px;background:#141720;border:1px solid #2f6;border-radius:12px;padding:14px;white-space:pre-wrap;line-height:1.5}
-footer{font-size:11px;color:#777;margin-top:22px}
-.top{display:flex;align-items:center;justify-content:space-between}#acct{font-size:13px;color:#9aa}#acct a{color:#f5b301}
-#login{display:none;background:#141720;border:1px solid #2a2d36;border-radius:12px;padding:12px;margin-bottom:12px}
-#login input{width:100%;margin-bottom:8px}#login button{padding:11px 16px}#lmsg{font-size:13px;color:#ff7b7b;margin-top:6px}
-#share{display:none;margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap;font-size:14px}
-#chat{margin-top:22px;background:#1a1440cc;border:1px solid #f107a3;box-shadow:0 0 20px #f107a333;border-radius:12px;padding:12px}#chat h2{font-size:16px;margin:0 0 8px}
-#msgs{max-height:340px;overflow-y:auto;font-size:15px;line-height:1.5;display:flex;flex-direction:column}.m{margin:6px 0;padding:8px 11px;border-radius:12px;white-space:pre-wrap;max-width:88%}
-.u{background:linear-gradient(90deg,#ff5e62,#ff9966);color:#fff;align-self:flex-end}.a{background:#2a2160;align-self:flex-start}#cf{margin-top:8px}
-#share a{padding:7px 12px;border:1px solid #2a2d36;border-radius:20px;color:#cfd;text-decoration:none}</style></head><body><div class="wrap">
+.grid{display:grid;grid-template-columns:1.6fr 1fr;gap:14px;margin-top:12px}@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.screen{border:3px solid #7b2ff7;border-radius:16px;overflow:hidden;background:#fff;color:#222}
+#view{padding:14px;min-height:240px;max-height:380px;overflow:hidden;font-size:15px;line-height:1.5}#vurl{color:#1a7f37;font-size:13px;word-break:break-all}
+#vtitle{font-size:19px;font-weight:800;margin:4px 0 6px;color:#1a0dab}#vtext{white-space:pre-wrap;color:#333}#vlinks{margin-top:8px;color:#1a0dab;font-size:14px}
+.steps{background:#f4efff;border:3px solid #c9b6ff;border-radius:16px;padding:12px 14px;font-size:16px;line-height:1.7}
+.steps ol{margin:0;padding:0;list-style:none}#status{color:#d6004c;margin-top:6px;font-weight:800}
+#ans{display:none;margin-top:16px;background:#eafff4;border:3px solid #19c37d;border-radius:16px;padding:16px;white-space:pre-wrap;line-height:1.6;font-size:17px}
+#login{display:none;background:#fff;border:3px solid #c9b6ff;border-radius:16px;padding:14px;margin-bottom:14px}
+#login input{width:100%;margin-bottom:10px}#login button{padding:13px 20px}#lmsg{font-size:15px;color:#d6004c;margin-top:6px}
+#share{display:none;margin-top:12px;gap:8px;align-items:center;flex-wrap:wrap;font-size:16px;font-weight:700}
+#share a{padding:8px 16px;border-radius:30px;color:#fff;text-decoration:none;font-weight:800}
+#sx{background:#111}#sw{background:#25d366}#sf{background:#1877f2}#cp{background:#7b2ff7}
+#chat{border:3px solid #ff3d7f}#chat .sub{margin:4px 0 10px}
+#msgs{max-height:420px;overflow-y:auto;font-size:17px;line-height:1.55;display:flex;flex-direction:column;background:#faf7ff;border-radius:14px;padding:10px;margin-top:8px}
+.m{margin:6px 0;padding:10px 14px;border-radius:18px;white-space:pre-wrap;max-width:88%}
+.u{background:linear-gradient(90deg,#ff3d7f,#ff8a00);color:#fff;align-self:flex-end;border-bottom-right-radius:4px}
+.a{background:#fff;border:2px solid #e6dcff;align-self:flex-start;border-bottom-left-radius:4px}#cf{margin-top:10px}
+.tg{display:inline-block;margin-top:12px;background:#229ed9;color:#fff;padding:10px 18px;border-radius:30px;font-weight:800;text-decoration:none;font-size:16px}
+footer{font-size:14px;color:#5a4f7a;margin:24px 0 10px;text-align:center}
+</style></head><body><div class="wrap">
 <div class="top"><h1><img class="logo" src="/agent/logo.png" alt=""><span class="grad">Tygar Agent</span></h1><span id="acct"><a href="#" id="si">Sign in</a></span></div>
-<p class="sub">Give it a task. Watch it search and read the web live, then get the answer. 3 free tasks a day, 5 when you sign in.</p>
+<div class="hero"><h2>Your free AI helper for Africa \U0001F30D</h2><p>Ask anything, research the web live, convert bet codes and make pictures. No app needed.</p>
+<div class="badges"><span>\u26A1 100% free</span><span>\U0001F1F3\U0001F1EC English + Pidgin</span><span>\U0001F512 No passwords</span></div>
+<a class="tg" href="https://t.me/Harkaiafricabot" target="_blank" rel="noopener">\u2708 Also on Telegram</a></div>
+<div class="feats"><a href="#agentcard" class="feat" style="--c:#00a8e8;text-decoration:none;color:inherit"><div class="ic">\U0001F50E</div><b>Live Agent</b><small>Watch it search</small></a>
+<a href="#chat" class="feat" style="--c:#ff3d7f;text-decoration:none;color:inherit"><div class="ic">\U0001F4AC</div><b>Chat</b><small>Ask anything</small></a>
+<a href="#chat" class="feat" style="--c:#19c37d;text-decoration:none;color:inherit"><div class="ic">\U0001F3AB</div><b>Bet codes</b><small>Convert in seconds</small></a>
+<a href="#chat" class="feat" style="--c:#ffb800;text-decoration:none;color:inherit"><div class="ic">\U0001F3A8</div><b>Images</b><small>Type and get art</small></a></div>
+<div class="card" id="agentcard"><h2>\U0001F50E Live web Agent</h2>
+<p class="sub">Give it a task, watch it read the web live, then get the answer. 3 free tasks a day, 5 when you sign in.</p>
 <div id="login"><input id="em" type="email" placeholder="Your email" autocomplete="email"><button id="sc" type="button">Send code</button>
 <div id="cbox" style="display:none;margin-top:8px"><input id="cd" inputmode="numeric" maxlength="6" placeholder="6-digit code"><button id="vc" type="button">Sign in</button></div>
 <div id="lmsg"></div></div>
@@ -840,8 +871,8 @@ footer{font-size:11px;color:#777;margin-top:22px}
 <div class="grid"><div class="screen"><div id="view"><div id="vurl"></div><div id="vtitle"></div><div id="vtext">Opening the web...</div><div id="vlinks"></div></div></div>
 <div class="steps"><ol id="steps"></ol><div id="status">Starting...</div></div></div>
 <div id="ans"></div>
-<div id="share"><span>Share:</span><a id="sx" target="_blank" rel="noopener">X</a><a id="sw" target="_blank" rel="noopener">WhatsApp</a><a id="sf" target="_blank" rel="noopener">Facebook</a><a href="#" id="cp">Copy</a></div></div>
-<div id="chat"><h2><img class="logo sm" src="/agent/logo.png" alt=""> Chat with Tygar</h2>
+<div id="share"><span>Share:</span><a id="sx" target="_blank" rel="noopener">X</a><a id="sw" target="_blank" rel="noopener">WhatsApp</a><a id="sf" target="_blank" rel="noopener">Facebook</a><a href="#" id="cp">Copy</a></div></div></div>
+<div id="chat" class="card"><h2><img class="logo sm" src="/agent/logo.png" alt=""> Chat with Tygar</h2>
 <p class="sub">Your free AI friend. Just type: ask anything, convert bet codes, make images, paste a link to summarise. English or Pidgin.</p>
 <div class="chips"><span class="chip cc">What can you do?</span><span class="chip cc">convert VESTC6 from SportyBet to MSport GH</span><span class="chip cc">draw a lion in a Super Eagles jersey</span><span class="chip cc">Wetin dey happen for Naija today?</span></div>
 <div id="msgs"><div class="m a">Hi! I'm Tygar \U0001F44B Ask me anything, or type "what can you do?"</div></div>
