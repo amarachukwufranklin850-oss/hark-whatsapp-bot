@@ -833,14 +833,15 @@ def agent_places():
         lat = float(request.args.get("lat")); lon = float(request.args.get("lon"))
     except Exception:
         lat = lon = None
-    R = H["requests"]
+    R = H["requests"].Session()
+    R.trust_env = False   # skip netrc/proxy lookups (they deadlocked a worker on Render)
     ua = {"User-Agent": "TygarAgent/1.0 (fan-made free helper; hark-whatsapp-bot.onrender.com)"}
     out = []
     try:
         p = {"q": q, "limit": 8, "lang": "en"}
         if lat is not None:
             p.update(lat=lat, lon=lon)
-        for f in R.get("https://photon.komoot.io/api/", params=p, headers=ua, timeout=12).json().get("features", []):
+        for f in R.get("https://photon.komoot.io/api/", params=p, headers=ua, timeout=(4, 8)).json().get("features", []):
             pr = f.get("properties", {})
             c = f.get("geometry", {}).get("coordinates") or [None, None]
             addr = ", ".join(x for x in [pr.get("housenumber"), pr.get("street"), pr.get("district") or pr.get("locality"),
@@ -854,7 +855,7 @@ def agent_places():
             p = {"q": q, "format": "jsonv2", "limit": 8, "addressdetails": 0}
             if lat is not None:
                 p["viewbox"] = f"{lon-1},{lat+1},{lon+1},{lat-1}"
-            for r in R.get("https://nominatim.openstreetmap.org/search", params=p, headers=ua, timeout=12).json():
+            for r in R.get("https://nominatim.openstreetmap.org/search", params=p, headers=ua, timeout=(4, 8)).json():
                 out.append({"name": r.get("name") or q, "addr": r.get("display_name", ""), "kind": (r.get("type") or "").replace("_", " "),
                             "lat": float(r["lat"]), "lon": float(r["lon"])})
         except Exception as e:

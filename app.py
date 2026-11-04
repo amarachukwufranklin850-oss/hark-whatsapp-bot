@@ -631,13 +631,13 @@ def _cf_image(prompt, seed):
         return None
     try:
         r = requests.post(f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/@cf/black-forest-labs/flux-1-schnell",
-                          headers={"Authorization": f"Bearer {tok}"}, json={"prompt": prompt, "steps": 6, "seed": seed}, timeout=60)
+                          headers={"Authorization": f"Bearer {tok}"}, json={"prompt": prompt, "steps": 6}, timeout=60)
         if r.status_code == 200:
             import base64
             b64 = (r.json().get("result") or {}).get("image")
             if b64:
                 return base64.b64decode(b64)
-        print("cf image status:", r.status_code, r.text[:200])
+        print("cf image status:", r.status_code, r.text[:300])
     except Exception as e:
         print("cf image error:", e)
     return None
