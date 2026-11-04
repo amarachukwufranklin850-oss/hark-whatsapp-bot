@@ -33,6 +33,7 @@ Reply with ONLY a JSON object, no other text:
  "arg": "<search words, a full https URL, a link number, or empty>"}
 Rules: you can only search, open public pages, click the numbered links, scroll and go back.
 Never try to log in, sign up, fill forms, buy, post or message anyone. If the goal needs that, choose done and explain.
+If a results page is empty or you already ran that search, do NOT search the same words again: open a result, try different words, or goto a reliable site directly (e.g. https://punchng.com, https://www.bbc.com/sport/football, https://www.jumia.com.ng).
 Prefer reliable sites. Finish with done as soon as your notes answer the goal (usually 3-8 steps)."""
 
 
@@ -84,18 +85,20 @@ def _ok_url(u):
     return H["safe_url"](u)
 
 
-ENGINES = ["https://www.bing.com/search?setlang=en&cc=NG&q=", "https://www.mojeek.com/search?q="]
+ENGINES = [("https://www.mojeek.com/search?q=", "ul.results-standard li a.ob, ul.results-standard li h2 a"),
+           ("https://www.bing.com/search?setlang=en&cc=NG&q=", "li.b_algo h2 a"),
+           ("https://html.duckduckgo.com/html/?q=", "a.result__a")]
 
 
 def _search(pg, q):
     """Open a results page; fall back to the next engine when one blocks the browser."""
-    for base in ENGINES:
+    for base, sel in ENGINES:
+        host = urlparse(base).hostname
         try:
             pg.goto(base + quote_plus(q), wait_until="domcontentloaded", timeout=25000)
             pg.wait_for_timeout(1200)
-            host = urlparse(base).hostname
-            n = pg.evaluate("h => [...document.querySelectorAll('a[href^=\"http\"]')].filter(a => !a.href.includes(h) || a.href.includes('/ck/a')).length", host)
-            if n >= 5:
+            n = pg.evaluate("s => document.querySelectorAll(s).length", sel)
+            if n >= 3:
                 return True
             print("agent search: few results on", host, n)
         except Exception as e:
@@ -276,7 +279,7 @@ def _run(chat, mid, token, goal):
                     live["phase"] = f"thinking {step}"
                     numbered = "\n".join(f"[{i}] {t}" for i, (t, h) in enumerate(links))
                     msgs = [{"role": "system", "content": SYSTEM},
-                            {"role": "user", "content": f"Goal: {goal}\nStep {step} of {MAX_STEPS + 1}.\nNotes so far:\n" + ("\n".join(notes) or "(none)") +
+                            {"role": "user", "content": f"Goal: {goal}\nStep {step} of {MAX_STEPS + 1}.\nYour actions so far:\n" + "\n".join(live["steps"][-6:]) + "\nNotes so far:\n" + ("\n".join(notes) or "(none)") +
                              f"\n\nURL: {pg.url}\nTitle: {title}\nText:\n{text}\n\nLinks:\n{numbered}"}]
                     print("agent step", step, pg.url[:80], len(links), "links")
                     # Freeze the page while the AI thinks: on the free server Chromium's scripts eat the CPU
