@@ -686,7 +686,7 @@ def agent_chat_job(jid):
         return {"reply": "That message expired. Please send it again."}
     if "reply" not in j:
         return {"pending": True}
-    return {"reply": j["reply"], "image": j.get("image")}
+    return {"reply": j["reply"], "image": j.get("image"), "pdf": j.get("pdf"), "pdf_name": j.get("pdf_name"), "heard": j.get("heard"), "video": j.get("video")}
 
 
 @bp.post("/agent/chat")
@@ -722,6 +722,152 @@ def agent_chat():
     out = _llm([{"role": "system", "content": CHAT_SYS}] + msgs, json_mode=False, limit=40)
     out = re.sub(r"<think>.*?</think>", "", out or "", flags=re.S).strip()
     return {"reply": out or "Sorry, I'm busy right now. Try again in a minute."}
+
+
+@bp.post("/agent/chat/audio")
+def agent_chat_audio():
+    import hashlib
+    email = _who_email()
+    who = ("cem:" + hashlib.sha256(email.encode()).hexdigest()[:16]) if email else ("c:" + _ip_hash())
+    key = (who, _day())
+    if _uses.get(key, 0) >= CHAT_DAILY:
+        return {"error": f"You've used today's {CHAT_DAILY} free chat messages. Come back tomorrow!"}, 429
+    f = request.files.get("audio")
+    if not f or not H.get("transcribe"):
+        return {"error": "No audio received."}, 400
+    audio = f.read(19_000_001)
+    if len(audio) > 19_000_000:
+        return {"error": "That audio is too big. Please keep it under about 5 minutes."}, 400
+    mt = (f.mimetype or "") + " " + (f.filename or "")
+    ext = next((e for e in ("mp3", "m4a", "mp4", "wav", "ogg", "oga", "opus", "flac", "aac") if e in mt.lower()), "webm")
+    ext = {"oga": "ogg", "aac": "m4a"}.get(ext, ext)
+    _uses[key] = _uses.get(key, 0) + 1
+    jid = secrets.token_urlsafe(9)
+    CHAT_JOBS[jid] = {"ts": time.time()}
+
+    def work():
+        try:
+            heard = H["transcribe"](audio, f"voice.{ext}")
+            if not heard:
+                CHAT_JOBS[jid]["reply"] = "I couldn't hear anything in that. Try again a bit louder."
+                return
+            out = H["web_chat"](who, heard)
+            out["heard"] = heard
+            CHAT_JOBS[jid].update(out)
+        except Exception as e:
+            print("web voice error:", str(e)[:200])
+            CHAT_JOBS[jid]["reply"] = "Sorry, I couldn't listen to that. Please try again or type it."
+    threading.Thread(target=work, daemon=True).start()
+    return {"job": jid}
+
+
+def _chat_who():
+    import hashlib
+    email = _who_email()
+    return ("cem:" + hashlib.sha256(email.encode()).hexdigest()[:16]) if email else ("c:" + _ip_hash())
+
+
+@bp.post("/agent/chat/photo")
+def agent_chat_photo():
+    who = _chat_who()
+    key = (who, _day())
+    if _uses.get(key, 0) >= CHAT_DAILY:
+        return {"error": f"You've used today's {CHAT_DAILY} free chat messages. Come back tomorrow!"}, 429
+    f = request.files.get("photo")
+    if not f or not H.get("vision"):
+        return {"error": "No photo received."}, 400
+    img = f.read(4_000_001)
+    if len(img) > 4_000_000:
+        return {"error": "That photo is too big. Please use one under 4 MB."}, 400
+    mime = "image/png" if "png" in (f.mimetype or "") else "image/webp" if "webp" in (f.mimetype or "") else "image/jpeg"
+    ask = (request.form.get("ask") or "")[:800]
+    _uses[key] = _uses.get(key, 0) + 1
+    jid = secrets.token_urlsafe(9)
+    CHAT_JOBS[jid] = {"ts": time.time()}
+
+    def work():
+        try:
+            CHAT_JOBS[jid].update(H["vision"](who, img, mime, ask))
+        except Exception as e:
+            print("web photo error:", str(e)[:200])
+            CHAT_JOBS[jid]["reply"] = "Sorry, I couldn't read that photo. Please try again."
+    threading.Thread(target=work, daemon=True).start()
+    return {"job": jid}
+
+
+_tts_use = {}
+
+
+@bp.post("/agent/speak")
+def agent_speak():
+    who = _chat_who()
+    key = (who, _day())
+    if _tts_use.get(key, 0) >= 40 or not H.get("tts"):
+        return {"error": "Voice limit reached for today."}, 429
+    t = ((request.get_json(silent=True) or {}).get("text") or "").strip()[:1200]
+    if not t:
+        return {"error": "Nothing to read."}, 400
+    _tts_use[key] = _tts_use.get(key, 0) + 1
+    try:
+        return Response(H["tts"](t), mimetype="audio/mpeg")
+    except Exception as e:
+        print("web tts error:", str(e)[:200])
+        return {"error": "Voice is busy, try again."}, 503
+
+
+_place_use = {}
+
+
+@bp.get("/agent/places")
+def agent_places():
+    """Find a shop/place by name with free OpenStreetMap data (Photon, then Nominatim), biased to the user's location."""
+    who = _chat_who()
+    key = (who, _day())
+    if _place_use.get(key, 0) >= 60:
+        return {"error": "You've used today's free searches. Come back tomorrow!"}, 429
+    q = (request.args.get("q") or "").strip()[:120]
+    if len(q) < 2:
+        return {"error": "Type a shop or place name."}, 400
+    _place_use[key] = _place_use.get(key, 0) + 1
+    try:
+        lat = float(request.args.get("lat")); lon = float(request.args.get("lon"))
+    except Exception:
+        lat = lon = None
+    R = H["requests"]
+    ua = {"User-Agent": "TygarAgent/1.0 (fan-made free helper; hark-whatsapp-bot.onrender.com)"}
+    out = []
+    try:
+        p = {"q": q, "limit": 8, "lang": "en"}
+        if lat is not None:
+            p.update(lat=lat, lon=lon)
+        for f in R.get("https://photon.komoot.io/api/", params=p, headers=ua, timeout=12).json().get("features", []):
+            pr = f.get("properties", {})
+            c = f.get("geometry", {}).get("coordinates") or [None, None]
+            addr = ", ".join(x for x in [pr.get("housenumber"), pr.get("street"), pr.get("district") or pr.get("locality"),
+                                         pr.get("city") or pr.get("county"), pr.get("state"), pr.get("country")] if x)
+            kind = (pr.get("osm_value") or "").replace("_", " ")
+            out.append({"name": pr.get("name") or q, "addr": addr, "kind": kind, "lat": c[1], "lon": c[0]})
+    except Exception as e:
+        print("photon error:", str(e)[:120])
+    if not out:
+        try:
+            p = {"q": q, "format": "jsonv2", "limit": 8, "addressdetails": 0}
+            if lat is not None:
+                p["viewbox"] = f"{lon-1},{lat+1},{lon+1},{lat-1}"
+            for r in R.get("https://nominatim.openstreetmap.org/search", params=p, headers=ua, timeout=12).json():
+                out.append({"name": r.get("name") or q, "addr": r.get("display_name", ""), "kind": (r.get("type") or "").replace("_", " "),
+                            "lat": float(r["lat"]), "lon": float(r["lon"])})
+        except Exception as e:
+            print("nominatim error:", str(e)[:120])
+    out = [o for o in out if o["lat"] is not None]
+    if lat is not None:
+        import math
+        for o in out:
+            dl, dn = math.radians(o["lat"] - lat), math.radians(o["lon"] - lon)
+            h = math.sin(dl/2)**2 + math.cos(math.radians(lat))*math.cos(math.radians(o["lat"]))*math.sin(dn/2)**2
+            o["km"] = round(6371 * 2 * math.asin(math.sqrt(h)), 2)
+        out.sort(key=lambda o: o["km"])
+    return {"results": out[:6]}
 
 
 @bp.get("/agent")
@@ -795,7 +941,7 @@ setTimeout(tick,1500);}tick();</script></body></html>"""
 
 
 APP_HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tygar Agent</title><link rel="icon" href="/agent/favicon.png"><meta property="og:image" content="/agent/logo.png"><style>
+<title>Tygar Agent</title><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><link rel="icon" href="/agent/favicon.png"><meta property="og:image" content="/agent/logo.png"><style>
 *{box-sizing:border-box}html{scroll-behavior:smooth}
 body{margin:0;min-height:100vh;color:#fff;font-family:"Segoe UI",system-ui,sans-serif;font-size:17px;line-height:1.55;
 background:linear-gradient(160deg,#5b0eeb,#c2189b 45%,#ff6a00 100%);background-size:200% 200%;animation:bg 14s ease infinite;background-attachment:fixed}
@@ -856,19 +1002,41 @@ button:disabled{opacity:.5}
 .m{margin:5px 0;padding:10px 14px;border-radius:20px;white-space:pre-wrap;max-width:85%;box-shadow:0 2px 6px #0001}
 .u{background:linear-gradient(90deg,#ff2e88,#ff6a00);color:#fff;align-self:flex-end;border-bottom-right-radius:6px}
 .a{background:#fff;align-self:flex-start;border-bottom-left-radius:6px}#cf{margin-top:10px}
+.card.main{padding:16px 14px;border:3px solid #ffe600;box-shadow:0 0 0 4px #ff2e8855,0 18px 40px #0005}
+.card.main #msgs{min-height:42vh;max-height:58vh}
+.on{margin-left:auto;font-size:13px;color:#00b86b;font-weight:800}
+.ib{flex:0 0 auto;width:48px;padding:0;display:flex;align-items:center;justify-content:center;font-size:22px;border-radius:16px;background:#f1eaff;box-shadow:none;cursor:pointer;color:#5b0eeb}
+#mic.live{background:#ff2e88;color:#fff;animation:b 1s infinite}#cs{width:54px;padding:0;font-size:22px}
+#cf{gap:6px}#rec{font-size:14px;color:#d6004c;font-weight:700;margin-top:6px}
+.pdf{display:inline-block;margin-top:8px;background:#7b2ff7;color:#fff;padding:9px 16px;border-radius:30px;text-decoration:none;font-weight:800}
+.more{text-align:center;font-size:20px;margin:6px 0 12px;font-weight:900}
+.hero{padding:14px 6px 16px}.hero h2{font-size:26px}.hero p{font-size:16px}
+.badges{margin:4px 0 6px}.tgw{text-align:center;margin-bottom:22px}
+#map{height:300px;border-radius:18px;margin-top:12px;border:3px solid #7b2ff7}
+.res{background:#f4efff;border-radius:14px;padding:10px 12px;margin-top:8px;cursor:pointer;font-size:15px}.res b{color:#5b0eeb}.res small{color:#5a4f7a;display:block}
+#nav{margin-top:12px;text-align:center}#dist{font-size:40px;font-weight:900;background:linear-gradient(90deg,#ff2e88,#ff6a00);-webkit-background-clip:text;background-clip:text;color:transparent}
+#dsub{color:#5a4f7a;font-size:15px;margin-bottom:8px}
+#tl{list-style:none;padding:0;margin:10px 0 0}#tl li{display:flex;gap:10px;align-items:center;padding:10px 12px;background:#f4efff;border-radius:14px;margin-top:6px;font-size:16px}
+#tl li.d span{text-decoration:line-through;opacity:.5}#tl li span{flex:1}#tl li i{cursor:pointer;font-style:normal}
+.tools{margin-top:6px;display:flex;gap:6px}.tools a{font-size:13px;background:#f1eaff;color:#5b0eeb;padding:4px 10px;border-radius:20px;text-decoration:none;font-weight:700}
+.you{width:18px;height:18px;border-radius:50%;background:#0072ff;border:3px solid #fff;box-shadow:0 0 0 6px #0072ff44}
 footer{font-size:12px;opacity:.85;margin:10px 0 0;text-align:center;line-height:1.5}
 @media(min-width:760px){.feats{grid-template-columns:repeat(4,1fr)}.grid{grid-template-columns:1.5fr 1fr}.hero h2{font-size:38px}.wrap{max-width:900px}}
 </style></head><body><div class="blob b1"></div><div class="blob b2"></div><div class="wrap">
 <div class="top"><h1><img class="logo" src="/agent/logo.png" alt=""><span class="grad">Tygar Agent</span></h1><span id="acct"><a href="#" id="si">Sign in</a></span></div>
-<div class="hero"><h2>Your free AI buddy for Africa \U0001F30D\u2728</h2><p>Ask anything, research the web live, convert bet codes and make pictures. No app needed.</p>
-<div class="badges"><span>\u26A1 100% free</span><span>\U0001F1F3\U0001F1EC English + Pidgin</span><span>\U0001F512 No passwords</span></div>
-<a class="tg" href="https://t.me/Harkaiafricabot" target="_blank" rel="noopener">\u2708 Also on Telegram</a></div>
-<div class="feats"><a href="#agentcard" class="feat f1"><div class="ic">\U0001F50E</div><b>Live Agent</b><small>Watch it search</small></a>
-<a href="#chat" class="feat f2"><div class="ic">\U0001F4AC</div><b>Chat</b><small>Ask anything</small></a>
-<a href="#chat" class="feat f3"><div class="ic">\U0001F3AB</div><b>Bet codes</b><small>Convert in seconds</small></a>
-<a href="#chat" class="feat f4"><div class="ic">\U0001F3A8</div><b>Images</b><small>Type and get art</small></a></div>
+<div class="hero"><h2>Your free AI buddy for Africa \U0001F30D\u2728</h2><p>Chat, talk, make pictures and PDFs, convert bet codes. English or Pidgin.</p></div>
+<div id="chat" class="card main"><h2><img class="logo sm" src="/agent/logo.png" alt=""> Chat with Tygar <span class="on">\u25CF online</span></h2>
+<div class="chips"><span class="chip cc">What can you do?</span><span class="chip cc">make a PDF on how to start a small business</span><span class="chip cc">convert VESTC6 from SportyBet to MSport GH</span><span class="chip cc">draw a lion in a Super Eagles jersey</span><span class="chip cc">make a video of Lagos at night</span><span class="chip cc">Wetin dey happen for Naija today?</span></div>
+<div id="msgs"><div class="m a">Hi! I'm Tygar \U0001F44B Ask me anything, or type "what can you do?"</div></div>
+<form id="cf"><button type="button" id="mic" class="ib" title="Talk">\U0001F3A4</button><label class="ib" title="Send a photo">\U0001F4F7<input id="pf" type="file" accept="image/*" hidden></label><label class="ib" title="Upload audio">\U0001F3B5<input id="af" type="file" accept="audio/*" hidden></label><input id="ci" placeholder="Ask Tygar anything..." maxlength="1500" autocomplete="off"><button id="cs">\u27A4</button></form><div id="rec"></div></div>
+<div class="card" id="shop"><h2>\U0001F4CD Find a shop</h2>
+<p class="sub">Type a shop's name. I'll pin it on the map, show you, and count down the distance live as you walk.</p>
+<form id="sf2"><input id="sq" placeholder="e.g. Shoprite Enugu, Chicken Republic Warri" maxlength="120" autocomplete="off"><button id="sb">Find</button></form>
+<div id="sres"></div><div id="map" style="display:none"></div>
+<div id="nav" style="display:none"><div id="dist">--</div><div id="dsub"></div>
+<a id="dir" class="pdf" target="_blank" rel="noopener">\U0001F9ED Directions</a> <a href="#" id="stop" class="pdf" style="background:#444">Stop</a></div></div>
 <div class="card" id="agentcard"><h2>\U0001F50E Live web Agent</h2>
-<p class="sub">Give it a task, watch it read the web live, then get the answer. 3 free tasks a day, 5 when you sign in.</p>
+<p class="sub">Give it a task and watch it read the web live. 3 free a day, 5 signed in.</p>
 <div id="login"><input id="em" type="email" placeholder="Your email" autocomplete="email"><button id="sc" type="button">Send code</button>
 <div id="cbox" style="display:none;margin-top:8px"><input id="cd" inputmode="numeric" maxlength="6" placeholder="6-digit code"><button id="vc" type="button">Sign in</button></div>
 <div id="lmsg"></div></div>
@@ -880,11 +1048,19 @@ footer{font-size:12px;opacity:.85;margin:10px 0 0;text-align:center;line-height:
 <div class="steps"><ol id="steps"></ol><div id="status">Starting...</div></div></div>
 <div id="ans"></div>
 <div id="share"><span>Share:</span><a id="sx" target="_blank" rel="noopener">X</a><a id="sw" target="_blank" rel="noopener">WhatsApp</a><a id="sf" target="_blank" rel="noopener">Facebook</a><a href="#" id="cp">Copy</a></div></div></div>
-<div id="chat" class="card"><h2><img class="logo sm" src="/agent/logo.png" alt=""> Chat with Tygar</h2>
-<p class="sub">Your free AI friend. Just type: ask anything, convert bet codes, make images, paste a link to summarise. English or Pidgin.</p>
-<div class="chips"><span class="chip cc">What can you do?</span><span class="chip cc">convert VESTC6 from SportyBet to MSport GH</span><span class="chip cc">draw a lion in a Super Eagles jersey</span><span class="chip cc">Wetin dey happen for Naija today?</span></div>
-<div id="msgs"><div class="m a">Hi! I'm Tygar \U0001F44B Ask me anything, or type "what can you do?"</div></div>
-<form id="cf"><input id="ci" placeholder="Ask Tygar anything..." maxlength="1500" autocomplete="off"><button id="cs">Send</button></form></div>
+<div class="card" id="todo"><h2>\u2705 My to-do</h2><p class="sub">Saved on this phone only.</p>
+<form id="tf"><input id="ti" placeholder="Add a task..." maxlength="200" autocomplete="off"><button>Add</button></form><ul id="tl"></ul></div>
+<h3 class="more">More from Tygar</h3>
+<div class="feats"><a href="#agentcard" class="feat f1"><div class="ic">\U0001F50E</div><b>Live Agent</b><small>Watch it search</small></a>
+<a href="#chat" class="feat f2"><div class="ic">\U0001F4AC</div><b>Chat</b><small>Ask anything</small></a>
+<a href="#chat" class="feat f3"><div class="ic">\U0001F3AB</div><b>Bet codes</b><small>Convert in seconds</small></a>
+<a href="#chat" class="feat f4"><div class="ic">\U0001F3A8</div><b>Images</b><small>Type and get art</small></a>
+<a href="#shop" class="feat f1"><div class="ic">\U0001F4CD</div><b>Shop finder</b><small>Live distance</small></a>
+<a href="#chat" class="feat f2"><div class="ic">\U0001F3A4</div><b>Voice</b><small>Talk, it listens</small></a>
+<a href="#chat" class="feat f3"><div class="ic">\U0001F4C4</div><b>PDFs</b><small>Notes in seconds</small></a>
+<a href="#chat" class="feat f4"><div class="ic">\U0001F3AC</div><b>Videos</b><small>Short clips</small></a></div>
+<div class="badges"><span>\u26A1 100% free</span><span>\U0001F1F3\U0001F1EC English + Pidgin</span><span>\U0001F512 No passwords</span></div>
+<a class="tg" href="https://t.me/Harkaiafricabot" target="_blank" rel="noopener">\u2708 Also on Telegram</a>
 <footer>Look-only agent: it reads public pages and never logs in, posts, buys or reads email. Sign-in uses your email only to send a code; it isn't stored on our server. Sharing opens your own X, WhatsApp or Facebook app, so you post it yourself. Fan-made by Unofficial Hark Fan Africa, not affiliated with Hark.</footer></div>
 <script>
 let T=null,n=-1;const $=id=>document.getElementById(id);
@@ -901,13 +1077,70 @@ $('lmsg').style.color='#ff7b7b';if(d.error){$('lmsg').textContent=d.error;return
 AUTH=d.token;EM=d.email;localStorage.setItem('ta_auth',AUTH);localStorage.setItem('ta_em',EM);$('login').style.display='none';acct();};
 let CH=[];document.querySelectorAll('.cc').forEach(c=>c.onclick=()=>{$('ci').value=c.textContent;$('ci').focus();});
 function addm(r,t){const e=document.createElement('div');e.className='m '+(r=='user'?'u':'a');e.textContent=t;$('msgs').appendChild(e);$('msgs').scrollTop=1e9;return e;}
+function tools(w,txt){const b=document.createElement('div');b.className='tools';
+const sp=document.createElement('a');sp.href='#';sp.textContent='\U0001F50A Listen';sp.onclick=async ev=>{ev.preventDefault();sp.textContent='\u23F3';
+try{const r=await fetch('/agent/speak',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({text:txt})});
+if(!r.ok)throw 0;const u=URL.createObjectURL(await r.blob());new Audio(u).play();sp.textContent='\U0001F50A Listen';}catch(x){sp.textContent='Voice busy';}};
+const cp=document.createElement('a');cp.href='#';cp.textContent='\U0001F4CB Copy';cp.onclick=ev=>{ev.preventDefault();navigator.clipboard.writeText(txt);cp.textContent='Copied';};
+b.appendChild(sp);b.appendChild(cp);w.appendChild(b);}
+async function finish(w,d){
+const jid=d.job;while(jid&&(d.job||d.pending)){await new Promise(z=>setTimeout(z,1500));d=await (await fetch('/agent/chat/'+jid)).json();}
+if(d.heard){const h=w.previousSibling;if(h&&h.classList.contains('u'))h.textContent='\U0001F3A4 '+d.heard;CH.push({role:'user',content:d.heard});}
+w.textContent=d.reply||d.error;
+if(d.image){const im=document.createElement('img');im.src=d.image;im.style.cssText='width:100%;border-radius:12px;margin-top:6px';w.appendChild(im);
+const a=document.createElement('a');a.href=d.image;a.download='tygar.jpg';a.className='pdf';a.textContent='\u2B07 Save image';w.appendChild(document.createElement('br'));w.appendChild(a);}
+if(d.video){const v=document.createElement('video');v.src=d.video;v.controls=true;v.playsInline=true;v.style.cssText='width:100%;border-radius:12px;margin-top:6px';w.appendChild(v);
+const a=document.createElement('a');a.href=d.video;a.download='tygar.mp4';a.className='pdf';a.textContent='\u2B07 Save video';w.appendChild(document.createElement('br'));w.appendChild(a);}
+if(d.pdf){const a=document.createElement('a');a.href=d.pdf;a.download=d.pdf_name||'tygar.pdf';a.className='pdf';a.textContent='\u2B07 Download PDF';w.appendChild(document.createElement('br'));w.appendChild(a);}
+if(d.reply){CH.push({role:'assistant',content:d.reply});if(!d.image&&!d.video&&!d.pdf)tools(w,d.reply);}$('msgs').scrollTop=1e9;}
 $('cf').onsubmit=async e=>{e.preventDefault();const t=$('ci').value.trim();if(!t)return;$('ci').value='';CH.push({role:'user',content:t});addm('user',t);
 const w=addm('assistant','...');$('cs').disabled=true;
 try{const r=await fetch('/agent/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({messages:CH.slice(-10)})});
-let d=await r.json();
-const jid=d.job;while(jid&&(d.job||d.pending)){await new Promise(z=>setTimeout(z,1500));d=await (await fetch('/agent/chat/'+jid)).json();}
-w.textContent=d.reply||d.error;if(d.image){const im=document.createElement('img');im.src=d.image;im.style.cssText='width:100%;border-radius:10px;margin-top:6px';w.appendChild(im);}if(d.reply)CH.push({role:'assistant',content:d.reply});}catch(x){w.textContent='Could not reach Tygar. Try again.';}
+await finish(w,await r.json());}catch(x){w.textContent='Could not reach Tygar. Try again.';}
 $('cs').disabled=false;};
+async function sendFile(url,field,blob,name,label){addm('user',label);const w=addm('assistant','...');
+const fd=new FormData();fd.append(field,blob,name);if(field=='photo'&&$('ci').value.trim()){fd.append('ask',$('ci').value.trim());$('ci').value='';}
+try{const r=await fetch(url,{method:'POST',headers:{'X-Agent-Auth':AUTH},body:fd});await finish(w,await r.json());}catch(x){w.textContent='Could not send that. Try again.';}}
+$('af').onchange=()=>{const f=$('af').files[0];if(f)sendFile('/agent/chat/audio','audio',f,f.name,'\U0001F3B5 '+f.name);$('af').value='';};
+$('pf').onchange=()=>{const f=$('pf').files[0];if(!f)return;const u=URL.createObjectURL(f);sendFile('/agent/chat/photo','photo',f,f.name,'\U0001F4F7 Photo').then(()=>{});
+const im=document.createElement('img');im.src=u;im.style.cssText='width:100%;border-radius:12px;margin-top:6px';[...document.querySelectorAll('.m.u')].pop().appendChild(im);$('pf').value='';};
+let MR=null,CK=[];$('mic').onclick=async()=>{if(MR&&MR.state=='recording'){MR.stop();return;}
+try{const st=await navigator.mediaDevices.getUserMedia({audio:true});MR=new MediaRecorder(st);CK=[];
+MR.ondataavailable=e=>CK.push(e.data);MR.onstop=()=>{st.getTracks().forEach(t=>t.stop());$('mic').classList.remove('live');$('rec').textContent='';
+const b=new Blob(CK,{type:MR.mimeType||'audio/webm'});const ext=(MR.mimeType||'').includes('mp4')?'m4a':'webm';sendFile('/agent/chat/audio','audio',b,'voice.'+ext,'\U0001F3A4 (voice note)');};
+MR.start();$('mic').classList.add('live');$('rec').textContent='\u25CF Recording... tap the mic again to send';setTimeout(()=>{if(MR.state=='recording')MR.stop();},120000);}
+catch(x){$('rec').textContent='Allow microphone access to talk to Tygar.';}};
+/* to-do (stored on this device) */
+let TD=JSON.parse(localStorage.getItem('ta_todo')||'[]');
+function rtd(){localStorage.setItem('ta_todo',JSON.stringify(TD));$('tl').innerHTML='';TD.forEach((x,i)=>{const li=document.createElement('li');if(x.d)li.className='d';
+li.innerHTML='<i>'+(x.d?'\u2705':'\u2B1C')+'</i><span></span><i>\U0001F5D1</i>';li.querySelector('span').textContent=x.t;
+li.children[0].onclick=()=>{x.d=!x.d;rtd();};li.children[2].onclick=()=>{TD.splice(i,1);rtd();};$('tl').appendChild(li);});}
+rtd();$('tf').onsubmit=e=>{e.preventDefault();const t=$('ti').value.trim();if(t){TD.push({t,d:false});$('ti').value='';rtd();}};
+/* shop finder */
+let ME=null,MAP=null,YOU=null,SHOP=null,LINE=null,WID=null,TGT=null;
+function km(a,b,c,d){const R=6371,r=Math.PI/180,x=Math.sin((c-a)*r/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin((d-b)*r/2)**2;return 2*R*Math.asin(Math.sqrt(x));}
+function fmt(k){return k<1?Math.round(k*1000)+' m':k.toFixed(k<10?2:1)+' km';}
+function locate(){return new Promise(ok=>{if(!navigator.geolocation)return ok(null);navigator.geolocation.getCurrentPosition(p=>{ME=[p.coords.latitude,p.coords.longitude];ok(ME);},()=>ok(null),{enableHighAccuracy:true,timeout:10000});});}
+$('sf2').onsubmit=async e=>{e.preventDefault();const q=$('sq').value.trim();if(!q)return;$('sb').disabled=true;$('sres').innerHTML='<div class="res">Finding your location and the shop...</div>';
+await locate();let u='/agent/places?q='+encodeURIComponent(q);if(ME)u+='&lat='+ME[0]+'&lon='+ME[1];
+try{const d=await (await fetch(u,{headers:{'X-Agent-Auth':AUTH}})).json();$('sres').innerHTML='';
+if(d.error||!d.results.length){$('sres').innerHTML='<div class="res">'+(d.error||'No match found. Try adding the town, e.g. "Shoprite Enugu".')+'</div>';}
+else{if(!ME)$('sres').innerHTML='<div class="res"><small>Turn on location to see how far each one is.</small></div>';
+d.results.forEach(r=>{const el=document.createElement('div');el.className='res';el.innerHTML='<b></b><small></small>';el.querySelector('b').textContent=r.name+(r.km!=null?' \u00B7 '+fmt(r.km):'');
+el.querySelector('small').textContent=[r.kind,r.addr].filter(Boolean).join(' \u2014 ');el.onclick=()=>go(r);$('sres').appendChild(el);});go(d.results[0]);}}
+catch(x){$('sres').innerHTML='<div class="res">Search is busy. Try again.</div>';}$('sb').disabled=false;};
+function go(r){TGT=r;$('map').style.display='block';$('nav').style.display='block';
+if(!MAP){MAP=L.map('map');L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'\u00A9 OpenStreetMap'}).addTo(MAP);}
+if(SHOP)SHOP.remove();SHOP=L.marker([r.lat,r.lon]).addTo(MAP).bindPopup(r.name).openPopup();
+$('dir').href='https://www.google.com/maps/dir/?api=1&destination='+r.lat+','+r.lon;$('dsub').textContent=r.name+(r.addr?' \u2014 '+r.addr:'');
+if(ME){MAP.fitBounds([ME,[r.lat,r.lon]],{padding:[40,40]});}else MAP.setView([r.lat,r.lon],16);upd();
+if(WID==null&&navigator.geolocation)WID=navigator.geolocation.watchPosition(p=>{ME=[p.coords.latitude,p.coords.longitude];upd();},()=>{},{enableHighAccuracy:true,maximumAge:3000});
+setTimeout(()=>MAP.invalidateSize(),200);$('map').scrollIntoView({behavior:'smooth',block:'center'});}
+function upd(){if(!TGT)return;if(!ME){$('dist').textContent='Location off';return;}
+if(!YOU)YOU=L.marker(ME,{icon:L.divIcon({className:'',html:'<div class="you"></div>',iconSize:[18,18]})}).addTo(MAP);else YOU.setLatLng(ME);
+if(LINE)LINE.remove();LINE=L.polyline([ME,[TGT.lat,TGT.lon]],{color:'#ff2e88',dashArray:'6 8',weight:4}).addTo(MAP);
+const k=km(ME[0],ME[1],TGT.lat,TGT.lon);$('dist').textContent=k<0.03?'\U0001F389 You are there!':fmt(k)+' away';}
+$('stop').onclick=e=>{e.preventDefault();if(WID!=null)navigator.geolocation.clearWatch(WID);WID=null;$('nav').style.display='none';};
 function share(goal,ans){const t=('Tygar Agent: '+goal+'\\n\\n'+ans).slice(0,1500),u=location.origin+'/agent';
 $('sx').href='https://x.com/intent/post?text='+encodeURIComponent(('Tygar Agent: '+goal+'\\n'+ans).slice(0,230))+'&url='+encodeURIComponent(u);
 $('sw').href='https://wa.me/?text='+encodeURIComponent(t+'\\n\\n'+u);
@@ -927,4 +1160,4 @@ if(s.n!==n){n=s.n;$('steps').innerHTML=s.steps.map(x=>'<li>'+x.replace(/</g,'&lt
 if(s.view){$('vurl').textContent=s.view.url;$('vtitle').textContent=s.view.title;$('vtext').textContent=s.view.text;$('vlinks').textContent=(s.view.links||[]).map(x=>'\u2192 '+x).join('\\n');}
 if(s.done){$('run').classList.add('done');$('ans').textContent=s.answer;$('ans').style.display='block';share(s.goal,s.answer);$('go').disabled=false;return;}}catch(e){}
 setTimeout(tick,1500);}
-</script></body></html>"""
+</script><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script></body></html>"""

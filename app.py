@@ -648,8 +648,9 @@ def ai_image(prompt, seed=None, size=1024, mark=True):
     from urllib.parse import quote
     seed = seed if seed is not None else int(time.time()) % 100000
     full = prompt.strip() + IMG_STYLE
-    img = _cf_image(full, seed)
-    if img is None:
+    cf = bool(os.environ.get("CF_ACCOUNT_ID") and os.environ.get("CF_API_TOKEN"))
+    img = _cf_image(full, seed) or (_cf_image(full, seed + 1) if cf else None)
+    if img is None and not cf:   # with Cloudflare set we never fall back, so no third-party badge ever appears
         key = os.environ.get("POLLINATIONS_KEY", "")
         url = (f"https://image.pollinations.ai/prompt/{quote(full)}?width={size}&height={size}"
                f"&seed={seed}&model=flux&enhance=true&nologo=true&safe=true")
@@ -2102,9 +2103,15 @@ def web_chat(uid, text):
                          "\u2022 Chat and answer questions with fresh web results (any language, Pidgin too)\n"
                          "\u2022 Convert bet codes: \"convert VESTC6 from SportyBet to MSport GH\"\n"
                          "\u2022 Make images: \"draw a lion wearing Super Eagles jersey\"\n"
+                         "\u2022 Make PDFs: \"make a PDF on how to start a small business\"\n"
+                         "\u2022 Short videos: \"make a video of Lagos at night\"\n"
+                         "\u2022 Voice: tap the mic or upload an audio file, I'll listen and reply\n"
+                         "\u2022 Photos: tap the camera to send a picture, I'll explain it or solve the homework\n"
+                         "\u2022 Tap \U0001F50A on any reply to hear it in a Nigerian voice\n"
+                         "\u2022 To-do list and notes saved on your phone\n"
                          "\u2022 Summarise any link: paste a URL\n"
                          "\u2022 Latest news, prices, scores: just ask\n"
-                         f"Bet codes work on: {names}.\nReminders and voice notes live in the Telegram bot @Harkaiafricabot."}
+                         f"Bet codes work on: {names}.\nReminders live in the Telegram bot @Harkaiafricabot."}
     m = WEB_CONV_RE.search(t)
     if m or low.startswith("convert") or low.startswith("/convert"):
         if not m:
@@ -2119,6 +2126,41 @@ def web_chat(uid, text):
         out = []
         betconv.run(f"web:{uid}", code, src, dst, lambda c, msg, *a, **k: out.append(msg))
         return {"reply": out[-1] if out else "Sorry, that didn't work. Try again in a minute."}
+    if low.startswith("/video") or VID_ASK.match(t):
+        import base64
+        prompt = media_prompt(t, "/video")
+        if not prompt:
+            return {"reply": "Tell me what the video should show, e.g. \"make a video of a rocket launching from Lagos at night\""}
+        if MEDIA_BLOCK.search(prompt):
+            return {"reply": "Sorry, I can't make that kind of video. Try something else."}
+        if not media_quota(f"web:{uid}", "vid"):
+            return {"reply": f"You've hit today's limit of {MEDIA_LIMITS['vid']} videos. Try again tomorrow."}
+        frames = []
+        if os.environ.get("CF_ACCOUNT_ID") and os.environ.get("CF_API_TOKEN"):
+            shots = ["wide establishing shot", "medium shot", "close-up detail", "dramatic low angle"]
+            frames = [f for f in (ai_image(f"{prompt}, {s}", seed=100 + k, mark=False) for k, s in enumerate(shots)) if f]
+        if len(frames) < 2:
+            frames = [p[0] for p in web_photos(prompt, 4)]
+        if len(frames) < 2:
+            return {"reply": f"I couldn't find enough pictures of \"{prompt}\" for a video. Try different words."}
+        vid = make_clip(frames, secs=3)
+        return {"reply": f"\U0001F3AC Your video: {prompt}", "video": "data:video/mp4;base64," + base64.b64encode(vid).decode()}
+    if PDF_ASK.search(t):
+        import base64
+        msgs = [{"role": "system", "content": SYSTEM + " You are writing the content of a PDF document. "
+                 "First line: a short title only. Then the document in plain text: use lines starting with "
+                 "'# ' for section headings and '- ' for bullet points. No tables, no emojis. Be thorough "
+                 "but clear (about 300-900 words unless asked otherwise)."},
+                {"role": "user", "content": t}]
+        out = (groq(msgs, tools=False).get("content") or "").strip()
+        out = re.sub(r"<think>.*?</think>", "", out, flags=re.S).strip()
+        if not out:
+            return {"reply": "Sorry, I couldn't write that PDF right now. Try again in a minute."}
+        title, _, body = out.partition("\n")
+        title = title.strip("# *").strip() or "Tygars Document"
+        data = make_pdf(title, body.strip())
+        fname = (re.sub(r"[^A-Za-z0-9]+", "_", title)[:40].strip("_") or "tygar") + ".pdf"
+        return {"reply": f"\U0001F4C4 Your PDF is ready: {title}", "pdf": "data:application/pdf;base64," + base64.b64encode(data).decode(), "pdf_name": fname}
     if WEB_IMG_RE.match(t) and len(WEB_IMG_RE.sub("", t).strip()) >= 3:
         prompt = (WEB_IMG_RE.sub("", t) if low.startswith("/image") else t).strip()[:300]
         img = ai_image(prompt)
@@ -2129,9 +2171,28 @@ def web_chat(uid, text):
     return {"reply": ask_ai(f"web:{uid}", t)}
 
 
+def web_transcribe(audio, name):
+    r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+                      headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                      files={"file": (name, audio)}, data={"model": "whisper-large-v3-turbo"}, timeout=60)
+    r.raise_for_status()
+    return (r.json().get("text") or "").strip()
+
+
+def web_vision(uid, img, mime, ask):
+    import base64
+    ask = ask or "Look at this image and help with it. If it's a question or homework, solve it step by step. Otherwise say briefly what it shows."
+    msgs = [{"role": "system", "content": SYSTEM},
+            {"role": "user", "content": [{"type": "text", "text": ask[:800]},
+                                         {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(img).decode()}"}}]}]
+    out = (groq(msgs, tools=False, model=VISION_MODEL).get("content") or "").strip()
+    out = re.sub(r"<think>.*?</think>", "", out, flags=re.S).replace("**", "").strip()
+    return {"reply": out or "Sorry, I couldn't read that image. Try a clearer photo."}
+
+
 threading.Thread(target=keep_awake, daemon=True).start()
 betconv.init(_launch, ensure_browser, _pw_lock)
-agent.init(web_chat=web_chat, web_search=web_search, send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, model=MODEL, lock=_pw_lock, launch=_launch,
+agent.init(web_chat=web_chat, transcribe=web_transcribe, vision=web_vision, tts=tts_mp3, web_search=web_search, send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, model=MODEL, lock=_pw_lock, launch=_launch,
            ensure_browser=ensure_browser, safe_url=safe_url, dev_ids=DEV_IDS,
            base_url=BROWSE_URL.rsplit("/browse", 1)[0],
            placeholder=lambda: open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg"), "rb").read())
