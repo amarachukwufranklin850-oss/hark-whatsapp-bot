@@ -1158,6 +1158,7 @@ footer{font-size:12px;opacity:.85;margin:10px 0 0;text-align:center;line-height:
 <a href="#chat" class="feat f4"><div class="ic">\U0001F3AC</div><b>Videos</b><small>Short clips</small></a></div>
 <div class="badges"><span>\u26A1 100% free</span><span>\U0001F1F3\U0001F1EC English + Pidgin</span><span>\U0001F512 No passwords</span></div>
 <a class="tg" href="https://t.me/Harkaiafricabot" target="_blank" rel="noopener">\u2708 Also on Telegram</a>
+<a class="tg" href="https://wa.me/2349162737819" target="_blank" rel="noopener" style="color:#25d366;margin-left:8px">\U0001F4AC Message support on WhatsApp</a>
 <footer>Look-only agent: it reads public pages and never logs in, posts, buys or reads email. Sign-in uses your email only to send a code; it isn't stored on our server. Sharing opens your own X, WhatsApp or Facebook app, so you post it yourself. Fan-made by Unofficial Hark Fan Africa, not affiliated with Hark.</footer></div>
 <script>
 let T=null,n=-1,F=0;const $=id=>document.getElementById(id);
