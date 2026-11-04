@@ -14,7 +14,7 @@ H = {}            # helpers from app.py, set by init()
 LIVE = {}         # token -> {"frame": bytes, "steps": [...], "status": str, "done": bool, "goal": str, "ts": float}
 DAILY = 3
 MAX_STEPS = 12
-TIME_LIMIT = 240
+TIME_LIMIT = 300
 _uses = {}        # (uid, day) -> n
 _queue = [0]
 
@@ -85,9 +85,9 @@ def _ok_url(u):
     return H["safe_url"](u)
 
 
-ENGINES = [("https://www.mojeek.com/search?q=", "ul.results-standard li a.ob, ul.results-standard li h2 a"),
+ENGINES = [("https://html.duckduckgo.com/html/?q=", "a.result__a"),
            ("https://www.bing.com/search?setlang=en&cc=NG&q=", "li.b_algo h2 a"),
-           ("https://html.duckduckgo.com/html/?q=", "a.result__a")]
+           ("https://www.mojeek.com/search?q=", "ul.results-standard li a.ob, ul.results-standard li h2 a")]
 
 
 def _search(pg, q):
@@ -122,7 +122,7 @@ AGENT_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
 LAST_ERR = [""]
 
 
-def _llm(msgs, json_mode=True, limit=30):
+def _llm(msgs, json_mode=True, limit=80):
     """Fast Groq call with a hard time limit, so a slow model never freezes the agent."""
     import concurrent.futures as cf
 
@@ -133,13 +133,13 @@ def _llm(msgs, json_mode=True, limit=30):
         if model.startswith("openai/"):
             body["reasoning_effort"] = "low"
             body["max_tokens"] = 1500
-        r = H["requests"].post("https://api.groq.com/openai/v1/chat/completions", timeout=(10, 35),
+        r = H["requests"].post("https://api.groq.com/openai/v1/chat/completions", timeout=(20, 75),
                                headers={"Authorization": f"Bearer {H['groq_key']}"}, json=body)
         if r.status_code >= 300:
             raise RuntimeError(f"groq {r.status_code}: {r.text[:200]}")
         return r.json()["choices"][0]["message"].get("content") or ""
 
-    for model in ([H.get("model")] if H.get("model") and H.get("model") not in AGENT_MODELS else []) + AGENT_MODELS:
+    for model in AGENT_MODELS[:2]:
         ex = cf.ThreadPoolExecutor(max_workers=1)
         try:
             return ex.submit(call, model).result(timeout=limit)
@@ -351,7 +351,7 @@ def _run(chat, mid, token, goal):
                                               "Plain text, short, no markdown tables. Say if something couldn't be confirmed. End with the main source links."},
                 {"role": "user", "content": f"Goal: {goal}\n\nNotes:\n" + ("\n".join(notes) or "(no useful notes)")}]
         try:
-            answer = re.sub(r"<think>.*?</think>", "", _llm(msgs, json_mode=False, limit=60), flags=re.S).strip()
+            answer = re.sub(r"<think>.*?</think>", "", _llm(msgs, json_mode=False, limit=80), flags=re.S).strip()
         except Exception as e:
             print("agent final error:", e)
         live["status"] = "\u2705 Done"
@@ -493,7 +493,7 @@ def live_state(token):
     v = LIVE.get(token)
     if not v:
         return {"gone": True}
-    if not v["done"] and time.time() - v["ts"] > 480:
+    if not v["done"] and time.time() - v["ts"] > 600:
         v["status"] = "\u26A0 This task took too long and was stopped."
     return {"goal": v["goal"], "steps": v["steps"], "status": v["status"], "done": v["done"], "n": len(v["steps"]),
             "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", ""), "llm_s": v.get("llm_s"),
