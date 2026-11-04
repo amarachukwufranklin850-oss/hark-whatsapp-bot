@@ -15,6 +15,40 @@ LIVE = {}         # token -> {"frame": bytes, "steps": [...], "status": str, "do
 DAILY = 3
 MAX_STEPS = 12
 TIME_LIMIT = 300
+
+# Flip to True before an upload/deploy to lock the whole web app behind an
+# "Updating..." screen; flip back to False in the same commit that ships the
+# finished change. While True, pages show the lock and all APIs return 503.
+UPDATING = True
+_MAINT_OK = {"/agent/logo.png", "/agent/favicon.png", "/favicon.ico",
+             "/agent/manifest.json", "/agent/icon-192.png", "/agent/icon-512.png",
+             "/agent/sw.js", "/.well-known/assetlinks.json"}
+
+MAINT_HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tygar is updating</title><link rel="icon" href="/agent/favicon.png"><meta http-equiv="refresh" content="15"><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+color:#fff;font-family:"Segoe UI",system-ui,sans-serif;padding:24px;
+background:linear-gradient(160deg,#5b0eeb,#c2189b 45%,#ff6a00 100%);background-size:200% 200%;animation:bg 14s ease infinite}
+@keyframes bg{0%,100%{background-position:0 0}50%{background-position:100% 100%}}
+img{width:88px;height:88px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 3px #ffe600,0 0 30px #ffe600aa;background:#000;margin-bottom:22px}
+.sp{width:46px;height:46px;border:5px solid #ffffff55;border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite;margin:6px 0 18px}
+@keyframes spin{to{transform:rotate(360deg)}}
+h1{font-size:28px;margin:0 0 8px;font-weight:900}p{font-size:17px;opacity:.95;max-width:420px;margin:0}</style></head>
+<body><img src="/agent/logo.png" alt=""><div class="sp"></div>
+<h1>Tygar is updating \U0001F6E0</h1><p>I'm shipping a new version right now. This page comes back on its own in a moment \u2014 nothing's broken.</p></body></html>"""
+
+
+@bp.before_request
+def _maint_gate():
+    if not UPDATING:
+        return None
+    p = request.path
+    if p in _MAINT_OK or p == "/agent/tygar.apk":
+        return None
+    if request.method == "GET" and (p == "/agent" or p.startswith("/live/")):
+        return Response(MAINT_HTML, mimetype="text/html", status=503)
+    return Response('{"error":"Tygar is updating, back in a moment."}',
+                    mimetype="application/json", status=503)
 _uses = {}        # (uid, day) -> n
 _queue = [0]
 
