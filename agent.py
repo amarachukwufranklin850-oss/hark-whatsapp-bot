@@ -1086,12 +1086,18 @@ button:disabled{opacity:.5}
 #share a{padding:9px 16px;border-radius:30px;color:#fff;text-decoration:none;font-weight:800}
 #sx{background:#111}#sw{background:#25d366}#sf{background:#1877f2}#cp{background:#7b2ff7}
 #chat .sub{margin:4px 0 6px}
-#msgs{max-height:60vh;min-height:160px;overflow-y:auto;font-size:16px;line-height:1.55;display:flex;flex-direction:column;background:linear-gradient(#f7f2ff,#fff2f8);border-radius:18px;padding:12px;margin-top:10px}
-.m{margin:5px 0;padding:10px 14px;border-radius:20px;white-space:pre-wrap;max-width:85%;box-shadow:0 2px 6px #0001}
-.u{background:linear-gradient(90deg,#ff2e88,#ff6a00);color:#fff;align-self:flex-end;border-bottom-right-radius:6px}
-.a{background:#fff;align-self:flex-start;border-bottom-left-radius:6px}#cf{margin-top:10px}
-.card.main{padding:16px 14px;border:3px solid #ffe600;box-shadow:0 0 0 4px #ff2e8855,0 18px 40px #0005}
-.card.main #msgs{min-height:42vh;max-height:58vh}
+#msgs{max-height:60vh;min-height:160px;overflow-y:auto;font-size:16px;line-height:1.6;display:flex;flex-direction:column;gap:10px;background:#f7f7fa;border-radius:16px;padding:14px 12px;margin-top:10px}
+.m{padding:11px 15px;border-radius:18px;white-space:pre-wrap;max-width:86%;box-shadow:none}
+.u{background:#e9ddff;color:#241046;align-self:flex-end;border-bottom-right-radius:6px}
+.a{background:#fff;color:#1d1240;align-self:flex-start;border:1px solid #ececf2;border-bottom-left-radius:6px}
+#cf{margin-top:12px;align-items:center;background:#f1f0f6;border:1px solid #e4e2ee;border-radius:28px;padding:5px 6px}
+#cf:focus-within{border-color:#7b2ff7;box-shadow:0 0 0 3px #7b2ff722}
+#ci{background:transparent;border:0;padding:12px 8px}#ci:focus{box-shadow:none}
+#cf .ib{background:transparent;width:42px}
+#cs{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#7b2ff7,#ff2e88);font-size:20px}
+.card.main{padding:16px 14px 12px;border:1px solid #efe8ff;box-shadow:0 18px 40px #0004}
+.card.main h2{font-size:20px}
+.card.main #msgs{min-height:46vh;max-height:60vh}
 .on{margin-left:auto;font-size:13px;color:#00b86b;font-weight:800}
 .ib{flex:0 0 auto;width:48px;padding:0;display:flex;align-items:center;justify-content:center;font-size:22px;border-radius:16px;background:#f1eaff;box-shadow:none;cursor:pointer;color:#5b0eeb}
 #mic.live{background:#ff2e88;color:#fff;animation:b 1s infinite}#cs{width:54px;padding:0;font-size:22px}
