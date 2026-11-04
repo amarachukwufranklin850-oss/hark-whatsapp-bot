@@ -471,6 +471,21 @@ def _lsearch(q):
             print("agent light search: weak results on", host, len(res), hits)
         except Exception as e:
             print("agent light search error:", base, str(e)[:150])
+    try:   # last resort: Bing News RSS (a feed, not a scraped page)
+        import xml.etree.ElementTree as ET
+        r = H["requests"].get("https://www.bing.com/news/search", params={"q": q, "format": "rss", "cc": "NG"}, headers=HDRS, timeout=15)
+        items, lines = [], []
+        for it in ET.fromstring(r.content).iter("item"):
+            t, l = (it.findtext("title") or "").strip(), it.findtext("link") or ""
+            real = parse_qs(urlparse(l).query).get("url", [l])[0]
+            if t and real.startswith("http") and not BLOCK_WORDS.search(real):
+                items.append((t[:90], real))
+                lines.append(f"{t} ({it.findtext('pubDate') or ''})\n{(it.findtext('description') or '')[:250]}")
+        if items:
+            _ENGINE_USED[0] = "bing news rss"
+            return r.url, f"News search: {q}", "\n\n".join(lines), items[:20]
+    except Exception as e:
+        print("agent rss error:", str(e)[:150])
     raise RuntimeError("search engines unavailable")
 
 
@@ -661,6 +676,19 @@ CHAT_SYS = ("You are Tygar, a free, friendly, fan-made AI chat assistant for peo
             "Never ask for passwords, OTPs, card or bank details.")
 
 
+CHAT_JOBS = {}
+
+
+@bp.get("/agent/chat/<jid>")
+def agent_chat_job(jid):
+    j = CHAT_JOBS.get(jid)
+    if not j:
+        return {"reply": "That message expired. Please send it again."}
+    if "reply" not in j:
+        return {"pending": True}
+    return {"reply": j["reply"], "image": j.get("image")}
+
+
 @bp.post("/agent/chat")
 def agent_chat():
     import hashlib
@@ -677,6 +705,20 @@ def agent_chat():
     if not msgs or msgs[-1]["role"] != "user" or not msgs[-1]["content"].strip():
         return {"error": "Type a message first."}, 400
     _uses[key] = _uses.get(key, 0) + 1
+    if H.get("web_chat"):
+        jid = secrets.token_urlsafe(9)
+        CHAT_JOBS[jid] = {"ts": time.time()}
+
+        def work():
+            try:
+                CHAT_JOBS[jid].update(H["web_chat"](who, msgs[-1]["content"]))
+            except Exception as e:
+                print("web chat error:", str(e)[:200])
+                CHAT_JOBS[jid]["reply"] = "Sorry, I hit a problem. Please try again in a minute."
+        for k in [k for k, v in CHAT_JOBS.items() if time.time() - v["ts"] > 900]:
+            CHAT_JOBS.pop(k, None)
+        threading.Thread(target=work, daemon=True).start()
+        return {"job": jid}
     out = _llm([{"role": "system", "content": CHAT_SYS}] + msgs, json_mode=False, limit=40)
     out = re.sub(r"<think>.*?</think>", "", out or "", flags=re.S).strip()
     return {"reply": out or "Sorry, I'm busy right now. Try again in a minute."}
@@ -755,7 +797,8 @@ setTimeout(tick,1500);}tick();</script></body></html>"""
 APP_HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tygar Agent</title><link rel="icon" href="/agent/favicon.png"><meta property="og:image" content="/agent/logo.png"><style>
 *{box-sizing:border-box}body{margin:0;min-height:100vh;color:#f2f2ff;font-family:system-ui,sans-serif;
-background:radial-gradient(circle at 10% 0%,#7b2ff7 0,transparent 40%),radial-gradient(circle at 95% 10%,#f107a3 0,transparent 38%),radial-gradient(circle at 50% 100%,#00c2ff 0,transparent 45%),#0b0820}
+background:linear-gradient(#0b0820d9,#0b0820e6),url(/agent/logo.png) center 120px/min(90vw,560px) no-repeat fixed,radial-gradient(circle at 10% 0%,#7b2ff7 0,transparent 40%),radial-gradient(circle at 95% 10%,#f107a3 0,transparent 38%),radial-gradient(circle at 50% 100%,#00c2ff 0,transparent 45%),#0b0820}
+.logo.sm{width:34px;height:34px;margin-right:6px}#chat .sub{margin:4px 0 8px}
 .logo{width:54px;height:54px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 18px #f107a3;vertical-align:middle;margin-right:10px}
 h1 .grad{background:linear-gradient(90deg,#ffd200,#ff5e62,#c86dd7,#00e0ff);-webkit-background-clip:text;background-clip:text;color:transparent}
 .wrap{max-width:920px;margin:0 auto;padding:16px}
@@ -798,7 +841,10 @@ footer{font-size:11px;color:#777;margin-top:22px}
 <div class="steps"><ol id="steps"></ol><div id="status">Starting...</div></div></div>
 <div id="ans"></div>
 <div id="share"><span>Share:</span><a id="sx" target="_blank" rel="noopener">X</a><a id="sw" target="_blank" rel="noopener">WhatsApp</a><a id="sf" target="_blank" rel="noopener">Facebook</a><a href="#" id="cp">Copy</a></div></div>
-<div id="chat"><h2>\U0001F4AC Chat with Tygar</h2><div id="msgs"></div>
+<div id="chat"><h2><img class="logo sm" src="/agent/logo.png" alt=""> Chat with Tygar</h2>
+<p class="sub">Your free AI friend. Just type: ask anything, convert bet codes, make images, paste a link to summarise. English or Pidgin.</p>
+<div class="chips"><span class="chip cc">What can you do?</span><span class="chip cc">convert VESTC6 from SportyBet to MSport GH</span><span class="chip cc">draw a lion in a Super Eagles jersey</span><span class="chip cc">Wetin dey happen for Naija today?</span></div>
+<div id="msgs"><div class="m a">Hi! I'm Tygar \U0001F44B Ask me anything, or type "what can you do?"</div></div>
 <form id="cf"><input id="ci" placeholder="Ask Tygar anything..." maxlength="1500" autocomplete="off"><button id="cs">Send</button></form></div>
 <footer>Look-only agent: it reads public pages and never logs in, posts, buys or reads email. Sign-in uses your email only to send a code; it isn't stored on our server. Sharing opens your own X, WhatsApp or Facebook app, so you post it yourself. Fan-made by Unofficial Hark Fan Africa, not affiliated with Hark.</footer></div>
 <script>
@@ -814,12 +860,14 @@ if(d.error){$('lmsg').textContent=d.error;return;}$('cbox').style.display='block
 $('vc').onclick=async()=>{const d=await post('/agent/login/verify',{email:$('em').value,code:$('cd').value});
 $('lmsg').style.color='#ff7b7b';if(d.error){$('lmsg').textContent=d.error;return;}
 AUTH=d.token;EM=d.email;localStorage.setItem('ta_auth',AUTH);localStorage.setItem('ta_em',EM);$('login').style.display='none';acct();};
-let CH=[];
+let CH=[];document.querySelectorAll('.cc').forEach(c=>c.onclick=()=>{$('ci').value=c.textContent;$('ci').focus();});
 function addm(r,t){const e=document.createElement('div');e.className='m '+(r=='user'?'u':'a');e.textContent=t;$('msgs').appendChild(e);$('msgs').scrollTop=1e9;return e;}
 $('cf').onsubmit=async e=>{e.preventDefault();const t=$('ci').value.trim();if(!t)return;$('ci').value='';CH.push({role:'user',content:t});addm('user',t);
 const w=addm('assistant','...');$('cs').disabled=true;
 try{const r=await fetch('/agent/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({messages:CH.slice(-10)})});
-const d=await r.json();w.textContent=d.reply||d.error;if(d.reply)CH.push({role:'assistant',content:d.reply});}catch(x){w.textContent='Could not reach Tygar. Try again.';}
+let d=await r.json();
+const jid=d.job;while(jid&&(d.job||d.pending)){await new Promise(z=>setTimeout(z,1500));d=await (await fetch('/agent/chat/'+jid)).json();}
+w.textContent=d.reply||d.error;if(d.image){const im=document.createElement('img');im.src=d.image;im.style.cssText='width:100%;border-radius:10px;margin-top:6px';w.appendChild(im);}if(d.reply)CH.push({role:'assistant',content:d.reply});}catch(x){w.textContent='Could not reach Tygar. Try again.';}
 $('cs').disabled=false;};
 function share(goal,ans){const t=('Tygar Agent: '+goal+'\\n\\n'+ans).slice(0,1500),u=location.origin+'/agent';
 $('sx').href='https://x.com/intent/post?text='+encodeURIComponent(('Tygar Agent: '+goal+'\\n'+ans).slice(0,230))+'&url='+encodeURIComponent(u);
@@ -827,7 +875,7 @@ $('sw').href='https://wa.me/?text='+encodeURIComponent(t+'\\n\\n'+u);
 $('sf').href='https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(u);
 $('cp').onclick=e=>{e.preventDefault();navigator.clipboard.writeText(t+'\\n\\n'+u);$('cp').textContent='Copied';};
 $('share').style.display='flex';}
-document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{$('g').value=c.textContent;});
+document.querySelectorAll('.chip:not(.cc)').forEach(c=>c.onclick=()=>{$('g').value=c.textContent;});
 $('fm').onsubmit=async e=>{e.preventDefault();$('err').textContent='';$('go').disabled=true;
 try{const r=await fetch('/agent/start',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({goal:$('g').value})});
 const d=await r.json();if(d.error){$('err').textContent=d.error;$('go').disabled=false;return;}

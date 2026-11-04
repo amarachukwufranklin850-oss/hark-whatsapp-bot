@@ -2015,9 +2015,50 @@ def keep_awake():
             print("keep-awake error:", e)
 
 
+WEB_IMG_RE = re.compile(r"^\s*(/image\s+|(please\s+)?(draw|sketch|paint)\s+(me\s+)?(an?\s+)?((image|picture|photo|logo|art|drawing)\s+)?(of\s+)?|(please\s+)?(generate|create|make|design)\s+(me\s+)?(an?\s+)?(image|picture|photo|logo|art|drawing|wallpaper)\s+(of\s+)?)", re.I)
+WEB_CONV_RE = re.compile(r"(?:/convert|convert)\s+([A-Za-z0-9]{4,14})\s+(?:from\s+)?(.+?)\s+(?:to|into|->)\s+(.+)", re.I)
+
+
+def web_chat(uid, text):
+    """Tygar on the website: the Telegram features, typed instead of tapped. Returns {"reply", "image"?}."""
+    t = text.strip()
+    low = t.lower()
+    if low in ("/start", "/menu", "/help", "help", "menu", "what can you do", "what can you do?"):
+        names = ", ".join(betconv.label(k) for k in betconv.working())
+        return {"reply": "Here's what I can do, just type it:\n"
+                         "\u2022 Chat and answer questions with fresh web results (any language, Pidgin too)\n"
+                         "\u2022 Convert bet codes: \"convert VESTC6 from SportyBet to MSport GH\"\n"
+                         "\u2022 Make images: \"draw a lion wearing Super Eagles jersey\"\n"
+                         "\u2022 Summarise any link: paste a URL\n"
+                         "\u2022 Latest news, prices, scores: just ask\n"
+                         f"Bet codes work on: {names}.\nReminders and voice notes live in the Telegram bot @Harkaiafricabot."}
+    m = WEB_CONV_RE.search(t)
+    if m or low.startswith("convert") or low.startswith("/convert"):
+        if not m:
+            names = ", ".join(betconv.label(k) for k in betconv.working())
+            return {"reply": f"Send it like this: convert CODE from BOOKIE to BOOKIE\ne.g. convert VESTC6 from SportyBet to MSport GH\nWorking now: {names}.\n{betconv.RESP}"}
+        code = m.group(1)
+        src = betconv.norm_bookie(m.group(2)) or betconv.norm_bookie(m.group(2).replace(" ", "_"))
+        dst = betconv.norm_bookie(m.group(3).strip(" .!?")) or betconv.norm_bookie(m.group(3).strip(" .!?").replace(" ", "_"))
+        if not src or not dst:
+            names = ", ".join(betconv.label(k) for k in betconv.working())
+            return {"reply": f"I didn't recognise one of those bookies. Working now: {names}."}
+        out = []
+        betconv.run(f"web:{uid}", code, src, dst, lambda c, msg, *a, **k: out.append(msg))
+        return {"reply": out[-1] if out else "Sorry, that didn't work. Try again in a minute."}
+    if WEB_IMG_RE.match(t) and len(WEB_IMG_RE.sub("", t).strip()) >= 3:
+        prompt = (WEB_IMG_RE.sub("", t) if low.startswith("/image") else t).strip()[:300]
+        img = ai_image(prompt)
+        if img:
+            import base64
+            return {"reply": f"\U0001F3A8 Here you go: {prompt}", "image": "data:image/jpeg;base64," + base64.b64encode(img).decode()}
+        return {"reply": "Sorry, the free image maker is busy right now. Try again in a minute."}
+    return {"reply": ask_ai(f"web:{uid}", t)}
+
+
 threading.Thread(target=keep_awake, daemon=True).start()
 betconv.init(_launch, ensure_browser, _pw_lock)
-agent.init(send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, model=MODEL, lock=_pw_lock, launch=_launch,
+agent.init(web_chat=web_chat, web_search=web_search, send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, model=MODEL, lock=_pw_lock, launch=_launch,
            ensure_browser=ensure_browser, safe_url=safe_url, dev_ids=DEV_IDS,
            base_url=BROWSE_URL.rsplit("/browse", 1)[0],
            placeholder=lambda: open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg"), "rb").read())
