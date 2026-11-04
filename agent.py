@@ -290,7 +290,7 @@ def _run(chat, mid, token, goal):
                     except Exception:
                         cur_y = 0
                     try:
-                        pg.context.close()
+                        pg.goto("about:blank", timeout=10000)
                     except Exception:
                         pass
                     t1 = time.time()
@@ -300,7 +300,6 @@ def _run(chat, mid, token, goal):
                         print("agent llm error:", e)
                         d = {}
                     live["llm_s"] = round(time.time() - t1, 1)
-                    pg = fresh_page()
                     if d.get("note"):
                         notes.append(f"- ({pg.url[:80]}) {str(d['note'])[:400]}")
                     live["phase"] = f"acting {step}: {d.get('action')}"
@@ -358,6 +357,7 @@ def _run(chat, mid, token, goal):
         live["status"] = "\u2705 Done"
     except Exception as e:
         print("agent error:", str(e)[:300])
+        live["phase"] = (live.get("phase", "") + " | error: " + type(e).__name__ + " " + str(e)[:120])
         live["status"] = "\u26A0 Sorry, the agent hit a problem. Please try again later."
     finally:
         live["done"] = True
