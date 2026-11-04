@@ -212,7 +212,7 @@ def web_start(goal, who, limit=DAILY):
     token = secrets.token_urlsafe(9)
     LIVE[token] = {"frame": b"", "steps": [], "status": "\u23F3 Starting the browser...", "done": False, "goal": goal,
                    "ts": time.time(), "url": H["base_url"] + "/live/" + token, "answer": ""}
-    threading.Thread(target=_run, args=(None, None, token, goal), daemon=True).start()
+    threading.Thread(target=_run_light, args=(token, goal), daemon=True).start()
     return {"token": token}
 
 
@@ -368,6 +368,180 @@ def _run(chat, mid, token, goal):
         H["send"](chat, ("\U0001F916 " + live["answer"])[:4000])
 
 
+# ---- Light mode: no Chromium. The free server (0.1 CPU) starves when a browser runs, so we read pages over HTTP. ----
+from html.parser import HTMLParser
+from urllib.parse import urljoin, parse_qs, unquote
+
+HDRS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "Accept-Language": "en-NG,en;q=0.9"}
+
+
+class _Reader(HTMLParser):
+    SKIP = {"script", "style", "noscript", "svg", "head", "iframe", "form", "nav", "footer"}
+
+    def __init__(self, base):
+        super().__init__(convert_charrefs=True)
+        self.base, self.depth, self.title, self.text, self.links, self._a, self._in_title = base, 0, "", [], [], None, False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self.depth += 1
+        if tag == "title":
+            self._in_title = True
+        if tag == "a" and not self.depth:
+            h = dict(attrs).get("href") or ""
+            self._a = [urljoin(self.base, h), ""]
+        if tag in ("p", "br", "li", "h1", "h2", "h3", "div", "tr"):
+            self.text.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self.depth:
+            self.depth -= 1
+        if tag == "title":
+            self._in_title = False
+        if tag == "a" and self._a:
+            t = re.sub(r"\s+", " ", self._a[1]).strip()[:70]
+            if len(t) >= 3 and self._a[0].startswith("http"):
+                self.links.append((t, self._a[0]))
+            self._a = None
+
+    def handle_data(self, d):
+        if self._in_title:
+            self.title += d
+        if self.depth:
+            return
+        self.text.append(d)
+        if self._a is not None:
+            self._a[1] += d
+
+
+def _unwrap(u):
+    """Search engines wrap result links; pull out the real address."""
+    try:
+        q = parse_qs(urlparse(u).query)
+        if "duckduckgo.com" in u and q.get("uddg"):
+            return unquote(q["uddg"][0])
+        if "yahoo.com" in u and "/RU=" in u:
+            return unquote(u.split("/RU=", 1)[1].split("/R", 1)[0])
+        if "bing.com/ck/a" in u and q.get("u"):
+            import base64
+            b = q["u"][0][2:]
+            return base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)).decode("utf-8", "ignore")
+    except Exception:
+        pass
+    return u
+
+
+def _fetch(url):
+    r = H["requests"].get(url, headers=HDRS, timeout=(8, 15), allow_redirects=True)
+    if "text/html" not in r.headers.get("content-type", "text/html"):
+        raise RuntimeError("not a web page")
+    rd = _Reader(r.url)
+    rd.feed(r.text[:600000])
+    text = re.sub(r"\n\s*\n+", "\n", re.sub(r"[ \t]+", " ", "".join(rd.text))).strip()
+    seen, links = set(), []
+    for t, h in rd.links:
+        h = _unwrap(h)
+        if h in seen or BLOCK_WORDS.search(h) or not h.startswith("http"):
+            continue
+        seen.add(h)
+        links.append((t, h))
+    return r.url, (rd.title or "").strip()[:120], text, links
+
+
+LIGHT_ENGINES = ["https://html.duckduckgo.com/html/?q=", "https://search.yahoo.com/search?p=", "https://www.mojeek.com/search?q=",
+                 "https://www.startpage.com/do/search?q=", "https://www.bing.com/search?setlang=en&cc=NG&q="]
+ENGINE_HOSTS = ("duckduckgo.com", "yahoo.com", "mojeek.com", "startpage.com", "bing.com", "microsoft.com", "yimg.com", "msn.com/en-us/feed")
+
+
+_ENGINE_USED = [""]
+
+
+def _lsearch(q):
+    for base in LIGHT_ENGINES:
+        try:
+            url, title, text, links = _fetch(base + quote_plus(q))
+            host = urlparse(base).hostname
+            res = [(t, h) for t, h in links if not any(e in h for e in ENGINE_HOSTS)]
+            words = {w for w in re.findall(r"[a-z0-9]{4,}", q.lower())} - {"latest", "best", "news", "what", "with", "from"}
+            hits = sum(1 for t, h in res[:12] if any(w in (t + " " + h).lower() for w in words)) if words else len(res)
+            if len(res) >= 3 and hits >= 2:
+                _ENGINE_USED[0] = host
+                return url, f"Search: {q}", text, res[:25]
+            print("agent light search: weak results on", host, len(res), hits)
+        except Exception as e:
+            print("agent light search error:", base, str(e)[:150])
+    raise RuntimeError("search engines unavailable")
+
+
+def _run_light(token, goal):
+    live = LIVE[token]
+    notes, answer, history = [], "", []
+    try:
+        url, title, text, links = _lsearch(goal)
+        history.append(url)
+        live["steps"].append(f"1. \U0001F50E Searching: {goal[:60]}")
+        t0, y = time.time(), 0
+        for step in range(2, MAX_STEPS + 2):
+            live["view"] = {"url": url, "title": title, "text": text[y:y + 700], "links": [t for t, h in links[:8]]}
+            live["status"] = f"\U0001F310 On {urlparse(url).hostname or ''}"
+            if time.time() - t0 > TIME_LIMIT:
+                break
+            live["phase"] = f"thinking {step}"
+            numbered = "\n".join(f"[{i}] {t} ({urlparse(h).hostname})" for i, (t, h) in enumerate(links[:25]))
+            msgs = [{"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": f"Goal: {goal}\nStep {step} of {MAX_STEPS + 1}.\nYour actions so far:\n" + "\n".join(live["steps"][-6:]) +
+                     "\nNotes so far:\n" + ("\n".join(notes) or "(none)") + f"\n\nURL: {url}\nTitle: {title}\nText:\n{text[y:y + 2500]}\n\nLinks:\n{numbered}"}]
+            t1 = time.time()
+            d = _json(_llm(msgs)) or {}
+            live["llm_s"] = round(time.time() - t1, 1)
+            if d.get("note"):
+                notes.append(f"- ({url[:80]}) {str(d['note'])[:400]}")
+            act, arg = (d.get("action") or "done"), str(d.get("arg") or "").strip()
+            live["phase"] = f"acting {step}: {act}"
+            say = str(d.get("say") or act)[:70]
+            try:
+                if act == "search" and arg:
+                    live["steps"].append(f"{step}. \U0001F50E {say}")
+                    url, title, text, links = _lsearch(arg); y = 0
+                elif act in ("goto", "click"):
+                    target = arg if act == "goto" else (links[int(arg)][1] if arg.isdigit() and int(arg) < len(links) else "")
+                    target = _ok_url(target)
+                    if not target:
+                        live["steps"].append(f"{step}. \u26A0 Skipped a page I'm not allowed to open")
+                        continue
+                    icon = "\U0001F517" if act == "goto" else "\U0001F446"
+                    live["steps"].append(f"{step}. {icon} {say}")
+                    url, title, text, links = _fetch(target); y = 0
+                    history.append(url)
+                elif act == "scroll":
+                    live["steps"].append(f"{step}. \u2B07 {say}")
+                    y = min(y + 2500, max(0, len(text) - 500))
+                elif act == "back" and len(history) > 1:
+                    live["steps"].append(f"{step}. \u21A9 {say}")
+                    history.pop()
+                    url, title, text, links = _fetch(history[-1]); y = 0
+                else:
+                    live["steps"].append(f"{step}. \u2705 {say}")
+                    break
+            except Exception as e:
+                live["steps"].append(f"{step}. \u26A0 That page didn't load, trying another way")
+                print("agent light step error:", str(e)[:200])
+        live["status"] = "\U0001F9E0 Writing up what I found..."
+        msgs = [{"role": "system", "content": "Answer the user's goal using ONLY these research notes. Be concrete: names, prices, numbers. "
+                                              "Plain text, short, no markdown tables. Say if something couldn't be confirmed. End with the main source links."},
+                {"role": "user", "content": f"Goal: {goal}\n\nNotes:\n" + ("\n".join(notes) or "(no useful notes)")}]
+        answer = re.sub(r"<think>.*?</think>", "", _llm(msgs, json_mode=False, limit=80), flags=re.S).strip()
+        live["status"] = "\u2705 Done"
+    except Exception as e:
+        print("agent light error:", str(e)[:300])
+        live["phase"] = live.get("phase", "") + " | error: " + type(e).__name__ + " " + str(e)[:120]
+        live["status"] = "\u26A0 Sorry, the agent hit a problem. Please try again later."
+    finally:
+        live["done"] = True
+    live["answer"] = answer or "Sorry, I couldn't find a clear answer this time. Try rewording the task."
+
+
 def _cleanup():
     now = time.time()
     for k in [k for k, v in LIVE.items() if now - v["ts"] > 3600]:
@@ -463,6 +637,34 @@ def login_verify():
     return {"token": _ser().dumps(email), "email": email, "daily": DAILY_SIGNED}
 
 
+CHAT_DAILY = 30
+CHAT_SYS = ("You are Tygar, a free, friendly, fan-made AI chat assistant for people across Africa, made by Unofficial Hark Fan Africa "
+            "(not affiliated with Hark). Reply in the user's language, including Naija Pidgin. Keep answers short and clear. "
+            "You can't browse, log in, buy, post or message anyone from this chat; for web research tell them to use the Agent box above. "
+            "Never ask for passwords, OTPs, card or bank details.")
+
+
+@bp.post("/agent/chat")
+def agent_chat():
+    import hashlib
+    d = request.get_json(silent=True) or {}
+    email = _who_email()
+    who = ("cem:" + hashlib.sha256(email.encode()).hexdigest()[:16]) if email else ("c:" + _ip_hash())
+    key = (who, _day())
+    if _uses.get(key, 0) >= CHAT_DAILY:
+        return {"error": f"You've used today's {CHAT_DAILY} free chat messages. Come back tomorrow!"}, 429
+    msgs = []
+    for m in (d.get("messages") or [])[-10:]:
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str):
+            msgs.append({"role": m["role"], "content": m["content"][:1500]})
+    if not msgs or msgs[-1]["role"] != "user" or not msgs[-1]["content"].strip():
+        return {"error": "Type a message first."}, 400
+    _uses[key] = _uses.get(key, 0) + 1
+    out = _llm([{"role": "system", "content": CHAT_SYS}] + msgs, json_mode=False, limit=40)
+    out = re.sub(r"<think>.*?</think>", "", out or "", flags=re.S).strip()
+    return {"reply": out or "Sorry, I'm busy right now. Try again in a minute."}
+
+
 @bp.get("/agent")
 def agent_home():
     return Response(APP_HTML, mimetype="text/html")
@@ -496,7 +698,7 @@ def live_state(token):
     if not v["done"] and time.time() - v["ts"] > 600:
         v["status"] = "\u26A0 This task took too long and was stopped."
     return {"goal": v["goal"], "steps": v["steps"], "status": v["status"], "done": v["done"], "n": len(v["steps"]),
-            "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", ""), "llm_s": v.get("llm_s"),
+            "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", ""), "llm_s": v.get("llm_s"), "view": v.get("view"), "engine": _ENGINE_USED[0],
             "llm_err": re.sub(r"(gsk_|Bearer )\S+", "***", LAST_ERR[0])[:200]}
 
 
@@ -519,7 +721,7 @@ header{padding:12px 14px;border-bottom:1px solid #222;display:flex;align-items:c
 #status{margin:0 14px;color:#f5b301;font-size:14px}ol{margin:8px 14px 20px;padding-left:4px;list-style:none;font-size:14px;line-height:1.6}
 footer{font-size:11px;color:#777;padding:0 14px 16px}</style></head><body>
 <header><span class="dot"></span><h1 id="goal">Tygar Agent</h1><span id="live">LIVE</span></header>
-<div class="screen"><img id="f" alt="Waiting for the first screen..."></div>
+<div class="screen" style="background:#fff;color:#222;padding:12px;font-size:13px;min-height:200px"><div id="vurl" style="color:#1a7f37;font-size:12px;word-break:break-all"></div><b id="vtitle" style="color:#1a0dab;font-size:16px"></b><div id="vtext" style="white-space:pre-wrap;max-height:340px;overflow:hidden"></div></div>
 <div id="status">Starting...</div><ol id="steps"></ol>
 <footer>Look-only agent: it reads public pages and never logs in, posts or buys. Fan-made, not affiliated with Hark.</footer>
 <script>
@@ -528,7 +730,7 @@ async function tick(){try{const s=await (await fetch('/live/'+T+'/state',{cache:
 if(s.gone){document.getElementById('status').textContent='This live view has ended.';return;}
 document.getElementById('goal').textContent=s.goal;document.getElementById('status').textContent=s.status;
 if(s.n!==n){n=s.n;document.getElementById('steps').innerHTML=s.steps.map(x=>'<li>'+x.replace(/</g,'&lt;')+'</li>').join('');}
-document.getElementById('f').src='/live/'+T+'/frame.jpg?'+Date.now();
+if(s.view){document.getElementById('vurl').textContent=s.view.url;document.getElementById('vtitle').textContent=s.view.title;document.getElementById('vtext').textContent=s.view.text;}
 if(s.done){document.body.classList.add('done');document.getElementById('live').textContent='DONE';return;}}catch(e){}
 setTimeout(tick,1500);}tick();</script></body></html>"""
 
@@ -547,7 +749,9 @@ button:disabled{opacity:.5}.chips{margin:10px 0 4px;display:flex;flex-wrap:wrap;
 .dot{width:9px;height:9px;border-radius:50%;background:#e33;animation:b 1s infinite}.done .dot{background:#2c2;animation:none}
 @keyframes b{50%{opacity:.3}}
 .grid{display:grid;grid-template-columns:1.6fr 1fr;gap:12px;margin-top:10px}@media(max-width:700px){.grid{grid-template-columns:1fr}}
-.screen{border:1px solid #2a2d36;border-radius:12px;overflow:hidden;background:#000}.screen img{width:100%;display:block;min-height:200px}
+.screen{border:1px solid #2a2d36;border-radius:12px;overflow:hidden;background:#fff;color:#222}
+#view{padding:12px;min-height:220px;max-height:360px;overflow:hidden;font-size:13px;line-height:1.45}#vurl{color:#1a7f37;font-size:12px;word-break:break-all}
+#vtitle{font-size:16px;font-weight:700;margin:4px 0 6px;color:#1a0dab}#vtext{white-space:pre-wrap;color:#333}#vlinks{margin-top:8px;color:#1a0dab;font-size:12px}
 .steps{background:#141720;border:1px solid #2a2d36;border-radius:12px;padding:10px 12px;font-size:14px;line-height:1.6}
 .steps ol{margin:0;padding:0;list-style:none}#status{color:#f5b301;margin-top:6px}
 #ans{display:none;margin-top:14px;background:#141720;border:1px solid #2f6;border-radius:12px;padding:14px;white-space:pre-wrap;line-height:1.5}
@@ -556,6 +760,9 @@ footer{font-size:11px;color:#777;margin-top:22px}
 #login{display:none;background:#141720;border:1px solid #2a2d36;border-radius:12px;padding:12px;margin-bottom:12px}
 #login input{width:100%;margin-bottom:8px}#login button{padding:11px 16px}#lmsg{font-size:13px;color:#ff7b7b;margin-top:6px}
 #share{display:none;margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap;font-size:14px}
+#chat{margin-top:22px;background:#141720;border:1px solid #2a2d36;border-radius:12px;padding:12px}#chat h2{font-size:16px;margin:0 0 8px}
+#msgs{max-height:340px;overflow-y:auto;font-size:15px;line-height:1.5;display:flex;flex-direction:column}.m{margin:6px 0;padding:8px 11px;border-radius:12px;white-space:pre-wrap;max-width:88%}
+.u{background:#f5b301;color:#111;align-self:flex-end}.a{background:#1d2130;align-self:flex-start}#cf{margin-top:8px}
 #share a{padding:7px 12px;border:1px solid #2a2d36;border-radius:20px;color:#cfd;text-decoration:none}</style></head><body><div class="wrap">
 <div class="top"><h1>\U0001F42F Tygar Agent</h1><span id="acct"><a href="#" id="si">Sign in</a></span></div>
 <p class="sub">Give it a task. Watch it search and read the web live, then get the answer. 3 free tasks a day, 5 when you sign in.</p>
@@ -566,10 +773,12 @@ footer{font-size:11px;color:#777;margin-top:22px}
 <div class="chips"><span class="chip">Compare MTN and Airtel 10GB data plans</span><span class="chip">Latest Super Eagles news</span><span class="chip">Best laptops under 400k naira</span></div>
 <div id="err"></div>
 <div id="run"><div class="bar"><span class="dot"></span><b id="goal"></b></div>
-<div class="grid"><div class="screen"><img id="f" alt="Waiting for the first screen..."></div>
+<div class="grid"><div class="screen"><div id="view"><div id="vurl"></div><div id="vtitle"></div><div id="vtext">Opening the web...</div><div id="vlinks"></div></div></div>
 <div class="steps"><ol id="steps"></ol><div id="status">Starting...</div></div></div>
 <div id="ans"></div>
 <div id="share"><span>Share:</span><a id="sx" target="_blank" rel="noopener">X</a><a id="sw" target="_blank" rel="noopener">WhatsApp</a><a id="sf" target="_blank" rel="noopener">Facebook</a><a href="#" id="cp">Copy</a></div></div>
+<div id="chat"><h2>\U0001F4AC Chat with Tygar</h2><div id="msgs"></div>
+<form id="cf"><input id="ci" placeholder="Ask Tygar anything..." maxlength="1500" autocomplete="off"><button id="cs">Send</button></form></div>
 <footer>Look-only agent: it reads public pages and never logs in, posts, buys or reads email. Sign-in uses your email only to send a code; it isn't stored on our server. Sharing opens your own X, WhatsApp or Facebook app, so you post it yourself. Fan-made by Unofficial Hark Fan Africa, not affiliated with Hark.</footer></div>
 <script>
 let T=null,n=-1;const $=id=>document.getElementById(id);
@@ -584,6 +793,13 @@ if(d.error){$('lmsg').textContent=d.error;return;}$('cbox').style.display='block
 $('vc').onclick=async()=>{const d=await post('/agent/login/verify',{email:$('em').value,code:$('cd').value});
 $('lmsg').style.color='#ff7b7b';if(d.error){$('lmsg').textContent=d.error;return;}
 AUTH=d.token;EM=d.email;localStorage.setItem('ta_auth',AUTH);localStorage.setItem('ta_em',EM);$('login').style.display='none';acct();};
+let CH=[];
+function addm(r,t){const e=document.createElement('div');e.className='m '+(r=='user'?'u':'a');e.textContent=t;$('msgs').appendChild(e);$('msgs').scrollTop=1e9;return e;}
+$('cf').onsubmit=async e=>{e.preventDefault();const t=$('ci').value.trim();if(!t)return;$('ci').value='';CH.push({role:'user',content:t});addm('user',t);
+const w=addm('assistant','...');$('cs').disabled=true;
+try{const r=await fetch('/agent/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({messages:CH.slice(-10)})});
+const d=await r.json();w.textContent=d.reply||d.error;if(d.reply)CH.push({role:'assistant',content:d.reply});}catch(x){w.textContent='Could not reach Tygar. Try again.';}
+$('cs').disabled=false;};
 function share(goal,ans){const t=('Tygar Agent: '+goal+'\\n\\n'+ans).slice(0,1500),u=location.origin+'/agent';
 $('sx').href='https://x.com/intent/post?text='+encodeURIComponent(('Tygar Agent: '+goal+'\\n'+ans).slice(0,230))+'&url='+encodeURIComponent(u);
 $('sw').href='https://wa.me/?text='+encodeURIComponent(t+'\\n\\n'+u);
@@ -594,13 +810,13 @@ document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{$('g').value=c.text
 $('fm').onsubmit=async e=>{e.preventDefault();$('err').textContent='';$('go').disabled=true;
 try{const r=await fetch('/agent/start',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({goal:$('g').value})});
 const d=await r.json();if(d.error){$('err').textContent=d.error;$('go').disabled=false;return;}
-T=d.token;n=-1;$('run').style.display='block';$('run').classList.remove('done');$('ans').style.display='none';$('share').style.display='none';$('steps').innerHTML='';$('f').removeAttribute('src');tick();}
+T=d.token;n=-1;$('run').style.display='block';$('run').classList.remove('done');$('ans').style.display='none';$('share').style.display='none';$('steps').innerHTML='';$('vtext').textContent='Opening the web...';$('vurl').textContent='';$('vtitle').textContent='';$('vlinks').textContent='';tick();}
 catch(x){$('err').textContent='Could not start. Please try again.';$('go').disabled=false;}};
 async function tick(){try{const s=await (await fetch('/live/'+T+'/state',{cache:'no-store'})).json();
 if(s.gone){$('status').textContent='This task has ended.';$('go').disabled=false;return;}
 $('goal').textContent=s.goal;$('status').textContent=s.status;
 if(s.n!==n){n=s.n;$('steps').innerHTML=s.steps.map(x=>'<li>'+x.replace(/</g,'&lt;')+'</li>').join('');}
-$('f').src='/live/'+T+'/frame.jpg?'+Date.now();
+if(s.view){$('vurl').textContent=s.view.url;$('vtitle').textContent=s.view.title;$('vtext').textContent=s.view.text;$('vlinks').textContent=(s.view.links||[]).map(x=>'\u2192 '+x).join('\\n');}
 if(s.done){$('run').classList.add('done');$('ans').textContent=s.answer;$('ans').style.display='block';share(s.goal,s.answer);$('go').disabled=false;return;}}catch(e){}
 setTimeout(tick,1500);}
 </script></body></html>"""
