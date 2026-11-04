@@ -119,7 +119,7 @@ AGENT_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-vers
 LAST_ERR = [""]
 
 
-def _llm(msgs, json_mode=True, limit=45):
+def _llm(msgs, json_mode=True, limit=30):
     """Fast Groq call with a hard time limit, so a slow model never freezes the agent."""
     import concurrent.futures as cf
 
@@ -195,15 +195,16 @@ def start(chat, uid, goal):
     threading.Thread(target=_run, args=(chat, mid, token, goal), daemon=True).start()
 
 
-def web_start(goal, who):
+def web_start(goal, who, limit=DAILY):
     goal = (goal or "").strip()[:200]
     if len(goal) < 4:
         return {"error": "Tell me what to find, e.g. cheapest iPhone 13 on Jumia Nigeria."}
     if BAD_GOAL.search(goal):
         return {"error": "I'm a look-only agent: I search, read and compare public pages. I never log in, sign up, read email, post, buy or message anyone."}
     key = ("web:" + who, _day())
-    if _uses.get(key, 0) >= DAILY:
-        return {"error": f"You've used today's {DAILY} free tasks. Come back tomorrow!"}
+    if _uses.get(key, 0) >= limit:
+        extra = "" if limit > DAILY else f" Sign in to get {DAILY_SIGNED} a day."
+        return {"error": f"You've used today's {limit} free tasks. Come back tomorrow!" + extra}
     _uses[key] = _uses.get(key, 0) + 1
     token = secrets.token_urlsafe(9)
     LIVE[token] = {"frame": b"", "steps": [], "status": "\u23F3 Starting the browser...", "done": False, "goal": goal,
@@ -278,11 +279,26 @@ def _run(chat, mid, token, goal):
                             {"role": "user", "content": f"Goal: {goal}\nStep {step} of {MAX_STEPS + 1}.\nNotes so far:\n" + ("\n".join(notes) or "(none)") +
                              f"\n\nURL: {pg.url}\nTitle: {title}\nText:\n{text}\n\nLinks:\n{numbered}"}]
                     print("agent step", step, pg.url[:80], len(links), "links")
+                    # Freeze the page while the AI thinks: on the free server Chromium's scripts eat the CPU
+                    cdp = None
+                    try:
+                        cdp = pg.context.new_cdp_session(pg)
+                        cdp.send("Page.setWebLifecycleState", {"state": "frozen"})
+                    except Exception as e:
+                        print("agent freeze failed:", str(e)[:100])
+                    t1 = time.time()
                     try:
                         d = _json(_llm(msgs)) or {}
                     except Exception as e:
                         print("agent llm error:", e)
                         d = {}
+                    live["llm_s"] = round(time.time() - t1, 1)
+                    try:
+                        if cdp:
+                            cdp.send("Page.setWebLifecycleState", {"state": "active"})
+                            cdp.detach()
+                    except Exception:
+                        pass
                     if d.get("note"):
                         notes.append(f"- ({pg.url[:80]}) {str(d['note'])[:400]}")
                     live["phase"] = f"acting {step}: {d.get('action')}"
@@ -347,6 +363,95 @@ def _cleanup():
         LIVE.pop(k, None)
 
 
+# ---- Sign-in to the Agent page (email code). No site logins ever pass through here. ----
+DAILY_SIGNED = 5
+_codes = {}       # email -> (code, expires, tries)
+_sends = {}       # key -> [timestamps]
+EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[a-z]{2,}$", re.I)
+
+
+def _ser():
+    import hashlib
+    from itsdangerous import URLSafeTimedSerializer
+    secret = hashlib.sha256(("tygar-agent:" + (H.get("token") or "x")).encode()).hexdigest()
+    return URLSafeTimedSerializer(secret, salt="agent-login")
+
+
+def _who_email():
+    tok = request.headers.get("X-Agent-Auth", "")
+    if not tok:
+        return None
+    try:
+        return _ser().loads(tok, max_age=30 * 86400)
+    except Exception:
+        return None
+
+
+def _limited(key, n, window):
+    now = time.time()
+    ts = [t for t in _sends.get(key, []) if now - t < window]
+    _sends[key] = ts
+    if len(ts) >= n:
+        return True
+    ts.append(now)
+    return False
+
+
+def _ip_hash():
+    import hashlib
+    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+    return hashlib.sha256(ip.encode()).hexdigest()[:16]
+
+
+@bp.post("/agent/login/send")
+def login_send():
+    d = request.get_json(silent=True) or {}
+    email = (d.get("email") or "").strip().lower()[:254]
+    if not EMAIL_RE.match(email):
+        return {"error": "Enter a valid email address."}, 400
+    if _limited("e:" + email, 3, 3600) or _limited("i:" + _ip_hash(), 6, 3600):
+        return {"error": "Too many codes asked for. Try again in an hour."}, 429
+    code = f"{secrets.randbelow(1000000):06d}"
+    _codes[email] = (code, time.time() + 600, 0)
+    key = __import__("os").environ.get("BREVO_API_KEY", "")
+    if not key:
+        return {"error": "Sign-in isn't available right now."}, 503
+    html_body = (f"<div style='font-family:sans-serif;font-size:16px'><p>Your Tygar Agent sign-in code is</p>"
+                 f"<p style='font-size:32px;font-weight:bold;letter-spacing:6px'>{code}</p>"
+                 f"<p>It expires in 10 minutes. If you didn't ask for it, ignore this email.</p>"
+                 f"<p style='color:#888;font-size:12px'>Tygar Agent is free and fan-made, not affiliated with Hark.</p></div>")
+    try:
+        r = H["requests"].post("https://api.brevo.com/v3/smtp/email", timeout=15,
+                               headers={"api-key": key, "Content-Type": "application/json"},
+                               json={"sender": {"name": "Tygar Agent", "email": __import__("os").environ.get("MAIL_FROM", "harkbotofficial@gmail.com")},
+                                     "to": [{"email": email}], "subject": f"{code} is your Tygar Agent code", "htmlContent": html_body})
+        if r.status_code >= 300:
+            print("agent brevo error:", r.status_code, r.text[:200])
+            return {"error": "Couldn't send the code. Try again later."}, 502
+    except Exception as e:
+        print("agent brevo error:", str(e)[:150])
+        return {"error": "Couldn't send the code. Try again later."}, 502
+    return {"ok": True}
+
+
+@bp.post("/agent/login/verify")
+def login_verify():
+    d = request.get_json(silent=True) or {}
+    email = (d.get("email") or "").strip().lower()[:254]
+    code = re.sub(r"\D", "", str(d.get("code") or ""))
+    rec = _codes.get(email)
+    if not rec or time.time() > rec[1]:
+        return {"error": "That code expired. Ask for a new one."}, 400
+    if rec[2] >= 5:
+        _codes.pop(email, None)
+        return {"error": "Too many wrong tries. Ask for a new code."}, 400
+    if not secrets.compare_digest(code, rec[0]):
+        _codes[email] = (rec[0], rec[1], rec[2] + 1)
+        return {"error": "Wrong code. Check your email and try again."}, 400
+    _codes.pop(email, None)
+    return {"token": _ser().dumps(email), "email": email, "daily": DAILY_SIGNED}
+
+
 @bp.get("/agent")
 def agent_home():
     return Response(APP_HTML, mimetype="text/html")
@@ -355,10 +460,12 @@ def agent_home():
 @bp.post("/agent/start")
 def agent_start():
     import hashlib
-    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
-    who = hashlib.sha256(ip.encode()).hexdigest()[:16]
     d = request.get_json(silent=True) or {}
-    out = web_start(d.get("goal"), who)
+    email = _who_email()
+    if email:
+        out = web_start(d.get("goal"), "em:" + hashlib.sha256(email.encode()).hexdigest()[:16], DAILY_SIGNED)
+    else:
+        out = web_start(d.get("goal"), _ip_hash())
     return (out, 400) if "error" in out else out
 
 
@@ -378,7 +485,7 @@ def live_state(token):
     if not v["done"] and time.time() - v["ts"] > 480:
         v["status"] = "\u26A0 This task took too long and was stopped."
     return {"goal": v["goal"], "steps": v["steps"], "status": v["status"], "done": v["done"], "n": len(v["steps"]),
-            "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", ""),
+            "answer": v.get("answer", "") if v["done"] else "", "phase": v.get("phase", ""), "llm_s": v.get("llm_s"),
             "llm_err": re.sub(r"(gsk_|Bearer )\S+", "***", LAST_ERR[0])[:200]}
 
 
@@ -433,29 +540,56 @@ button:disabled{opacity:.5}.chips{margin:10px 0 4px;display:flex;flex-wrap:wrap;
 .steps{background:#141720;border:1px solid #2a2d36;border-radius:12px;padding:10px 12px;font-size:14px;line-height:1.6}
 .steps ol{margin:0;padding:0;list-style:none}#status{color:#f5b301;margin-top:6px}
 #ans{display:none;margin-top:14px;background:#141720;border:1px solid #2f6;border-radius:12px;padding:14px;white-space:pre-wrap;line-height:1.5}
-footer{font-size:11px;color:#777;margin-top:22px}</style></head><body><div class="wrap">
-<h1>\U0001F42F Tygar Agent</h1><p class="sub">Give it a task. Watch it search and read the web live, then get the answer. 3 free tasks a day.</p>
+footer{font-size:11px;color:#777;margin-top:22px}
+.top{display:flex;align-items:center;justify-content:space-between}#acct{font-size:13px;color:#9aa}#acct a{color:#f5b301}
+#login{display:none;background:#141720;border:1px solid #2a2d36;border-radius:12px;padding:12px;margin-bottom:12px}
+#login input{width:100%;margin-bottom:8px}#login button{padding:11px 16px}#lmsg{font-size:13px;color:#ff7b7b;margin-top:6px}
+#share{display:none;margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap;font-size:14px}
+#share a{padding:7px 12px;border:1px solid #2a2d36;border-radius:20px;color:#cfd;text-decoration:none}</style></head><body><div class="wrap">
+<div class="top"><h1>\U0001F42F Tygar Agent</h1><span id="acct"><a href="#" id="si">Sign in</a></span></div>
+<p class="sub">Give it a task. Watch it search and read the web live, then get the answer. 3 free tasks a day, 5 when you sign in.</p>
+<div id="login"><input id="em" type="email" placeholder="Your email" autocomplete="email"><button id="sc" type="button">Send code</button>
+<div id="cbox" style="display:none;margin-top:8px"><input id="cd" inputmode="numeric" maxlength="6" placeholder="6-digit code"><button id="vc" type="button">Sign in</button></div>
+<div id="lmsg"></div></div>
 <form id="fm"><input id="g" placeholder="e.g. cheapest iPhone 13 on Jumia Nigeria" maxlength="200" autocomplete="off"><button id="go">Start</button></form>
 <div class="chips"><span class="chip">Compare MTN and Airtel 10GB data plans</span><span class="chip">Latest Super Eagles news</span><span class="chip">Best laptops under 400k naira</span></div>
 <div id="err"></div>
 <div id="run"><div class="bar"><span class="dot"></span><b id="goal"></b></div>
 <div class="grid"><div class="screen"><img id="f" alt="Waiting for the first screen..."></div>
 <div class="steps"><ol id="steps"></ol><div id="status">Starting...</div></div></div>
-<div id="ans"></div></div>
-<footer>Look-only agent: it reads public pages and never logs in, posts, buys or reads email. Fan-made by Unofficial Hark Fan Africa, not affiliated with Hark.</footer></div>
+<div id="ans"></div>
+<div id="share"><span>Share:</span><a id="sx" target="_blank" rel="noopener">X</a><a id="sw" target="_blank" rel="noopener">WhatsApp</a><a id="sf" target="_blank" rel="noopener">Facebook</a><a href="#" id="cp">Copy</a></div></div>
+<footer>Look-only agent: it reads public pages and never logs in, posts, buys or reads email. Sign-in uses your email only to send a code; it isn't stored on our server. Sharing opens your own X, WhatsApp or Facebook app, so you post it yourself. Fan-made by Unofficial Hark Fan Africa, not affiliated with Hark.</footer></div>
 <script>
 let T=null,n=-1;const $=id=>document.getElementById(id);
+let AUTH=localStorage.getItem('ta_auth')||'',EM=localStorage.getItem('ta_em')||'';
+function acct(){$('acct').innerHTML=AUTH?(EM.replace(/</g,'&lt;')+' &middot; <a href="#" id="so">Sign out</a>'):'<a href="#" id="si">Sign in</a>';
+if(AUTH){$('so').onclick=e=>{e.preventDefault();AUTH='';EM='';localStorage.removeItem('ta_auth');localStorage.removeItem('ta_em');acct();};}
+else{$('si').onclick=e=>{e.preventDefault();$('login').style.display=$('login').style.display=='block'?'none':'block';};}}
+acct();
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json();}
+$('sc').onclick=async()=>{$('lmsg').textContent='';const d=await post('/agent/login/send',{email:$('em').value});
+if(d.error){$('lmsg').textContent=d.error;return;}$('cbox').style.display='block';$('lmsg').style.color='#9c9';$('lmsg').textContent='Code sent. Check your inbox (and spam).';};
+$('vc').onclick=async()=>{const d=await post('/agent/login/verify',{email:$('em').value,code:$('cd').value});
+$('lmsg').style.color='#ff7b7b';if(d.error){$('lmsg').textContent=d.error;return;}
+AUTH=d.token;EM=d.email;localStorage.setItem('ta_auth',AUTH);localStorage.setItem('ta_em',EM);$('login').style.display='none';acct();};
+function share(goal,ans){const t=('Tygar Agent: '+goal+'\\n\\n'+ans).slice(0,1500),u=location.origin+'/agent';
+$('sx').href='https://x.com/intent/post?text='+encodeURIComponent(('Tygar Agent: '+goal+'\\n'+ans).slice(0,230))+'&url='+encodeURIComponent(u);
+$('sw').href='https://wa.me/?text='+encodeURIComponent(t+'\\n\\n'+u);
+$('sf').href='https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(u);
+$('cp').onclick=e=>{e.preventDefault();navigator.clipboard.writeText(t+'\\n\\n'+u);$('cp').textContent='Copied';};
+$('share').style.display='flex';}
 document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{$('g').value=c.textContent;});
 $('fm').onsubmit=async e=>{e.preventDefault();$('err').textContent='';$('go').disabled=true;
-try{const r=await fetch('/agent/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal:$('g').value})});
+try{const r=await fetch('/agent/start',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({goal:$('g').value})});
 const d=await r.json();if(d.error){$('err').textContent=d.error;$('go').disabled=false;return;}
-T=d.token;n=-1;$('run').style.display='block';$('run').classList.remove('done');$('ans').style.display='none';$('steps').innerHTML='';$('f').removeAttribute('src');tick();}
+T=d.token;n=-1;$('run').style.display='block';$('run').classList.remove('done');$('ans').style.display='none';$('share').style.display='none';$('steps').innerHTML='';$('f').removeAttribute('src');tick();}
 catch(x){$('err').textContent='Could not start. Please try again.';$('go').disabled=false;}};
 async function tick(){try{const s=await (await fetch('/live/'+T+'/state',{cache:'no-store'})).json();
 if(s.gone){$('status').textContent='This task has ended.';$('go').disabled=false;return;}
 $('goal').textContent=s.goal;$('status').textContent=s.status;
 if(s.n!==n){n=s.n;$('steps').innerHTML=s.steps.map(x=>'<li>'+x.replace(/</g,'&lt;')+'</li>').join('');}
 $('f').src='/live/'+T+'/frame.jpg?'+Date.now();
-if(s.done){$('run').classList.add('done');$('ans').textContent=s.answer;$('ans').style.display='block';$('go').disabled=false;return;}}catch(e){}
+if(s.done){$('run').classList.add('done');$('ans').textContent=s.answer;$('ans').style.display='block';share(s.goal,s.answer);$('go').disabled=false;return;}}catch(e){}
 setTimeout(tick,1500);}
 </script></body></html>"""
