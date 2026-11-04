@@ -797,68 +797,76 @@ setTimeout(tick,1500);}tick();</script></body></html>"""
 APP_HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tygar Agent</title><link rel="icon" href="/agent/favicon.png"><meta property="og:image" content="/agent/logo.png"><style>
 *{box-sizing:border-box}html{scroll-behavior:smooth}
-body{margin:0;min-height:100vh;color:#1d1240;font-family:"Segoe UI",system-ui,sans-serif;font-size:18px;line-height:1.5;
-background:linear-gradient(135deg,#fff3c4,#ffd6e8 35%,#d9e8ff 70%,#d6fff1);background-size:300% 300%;animation:bg 18s ease infinite}
-@keyframes bg{0%,100%{background-position:0 50%}50%{background-position:100% 50%}}
-body::before{content:"";position:fixed;inset:0;background:url(/agent/logo.png) center 55%/min(80vw,620px) no-repeat;opacity:.07;pointer-events:none;z-index:0}
-.wrap{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:18px}
-.top{display:flex;align-items:center;justify-content:space-between;gap:10px}
-h1{font-size:34px;margin:6px 0;font-weight:900;display:flex;align-items:center}
-.logo{width:64px;height:64px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 4px #ff3d7f,0 8px 22px #ff3d7f66;margin-right:12px;animation:pop 3s ease-in-out infinite}
-@keyframes pop{50%{transform:scale(1.06) rotate(-3deg)}}
-.logo.sm{width:44px;height:44px;margin-right:10px;box-shadow:0 0 0 3px #7b2ff7;animation:none}
-.grad{background:linear-gradient(90deg,#ff3d7f,#ff8a00,#7b2ff7,#00a8e8);background-size:200%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sh 6s linear infinite}
+body{margin:0;min-height:100vh;color:#fff;font-family:"Segoe UI",system-ui,sans-serif;font-size:17px;line-height:1.55;
+background:linear-gradient(160deg,#5b0eeb,#c2189b 45%,#ff6a00 100%);background-size:200% 200%;animation:bg 14s ease infinite;background-attachment:fixed}
+@keyframes bg{0%,100%{background-position:0 0}50%{background-position:100% 100%}}
+body::before{content:"";position:fixed;inset:0;background:url(/agent/logo.png) center 60%/min(85vw,520px) no-repeat;opacity:.08;mix-blend-mode:screen;pointer-events:none;z-index:0}
+.blob{position:fixed;border-radius:50%;filter:blur(60px);opacity:.55;z-index:0;pointer-events:none;animation:fl 12s ease-in-out infinite}
+.b1{width:260px;height:260px;background:#00e5ff;top:-60px;left:-80px}.b2{width:300px;height:300px;background:#ffe600;bottom:-90px;right:-100px;animation-delay:-6s}
+@keyframes fl{50%{transform:translate(40px,30px) scale(1.15)}}
+.wrap{position:relative;z-index:1;max-width:720px;margin:0 auto;padding:16px 16px 28px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
+h1{font-size:26px;margin:0;font-weight:900;display:flex;align-items:center;letter-spacing:.3px}
+.logo{width:52px;height:52px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 3px #ffe600,0 0 24px #ffe600aa;margin-right:10px;animation:pop 3s ease-in-out infinite;background:#000}
+@keyframes pop{50%{transform:scale(1.07) rotate(-4deg)}}
+.logo.sm{width:38px;height:38px;margin-right:8px;box-shadow:0 0 0 3px #ff2e88;animation:none}
+.grad{background:linear-gradient(90deg,#fff,#ffe600,#00e5ff,#fff);background-size:200%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:sh 5s linear infinite}
 @keyframes sh{to{background-position:200% 0}}
-#acct{font-size:16px;font-weight:700}#acct a{color:#fff;background:#7b2ff7;padding:8px 16px;border-radius:30px;text-decoration:none;box-shadow:0 4px 12px #7b2ff755}
-.hero{background:linear-gradient(120deg,#ff3d7f,#ff8a00);color:#fff;border-radius:22px;padding:22px;margin:14px 0 18px;box-shadow:0 12px 30px #ff3d7f44}
-.hero h2{font-size:28px;margin:0 0 6px;font-weight:900}.hero p{margin:0;font-size:18px;opacity:.95}
-.badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.badges span{background:#ffffff33;border:1px solid #ffffff88;padding:5px 12px;border-radius:20px;font-size:15px;font-weight:700}
-.feats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:0 0 20px}@media(max-width:760px){.feats{grid-template-columns:repeat(2,1fr)}}
-.feat{background:#fff;border-radius:18px;padding:14px;text-align:center;box-shadow:0 6px 18px #7b2ff722;border-top:6px solid var(--c);transition:transform .2s}
-.feat:hover{transform:translateY(-4px)}.feat b{display:block;font-size:19px;margin-top:4px}.feat small{color:#5a4f7a;font-size:15px}.feat .ic{font-size:34px}
-.card{background:#ffffffee;border-radius:22px;padding:18px;box-shadow:0 10px 28px #7b2ff722;margin-bottom:20px}
-.card h2{font-size:26px;margin:0 0 4px;display:flex;align-items:center;font-weight:900}
-.sub{color:#5a4f7a;font-size:17px;margin:0 0 14px}
-form{display:flex;gap:10px}input{flex:1;padding:16px;border-radius:14px;border:3px solid #c9b6ff;background:#fff;color:#1d1240;font-size:18px;outline:none}
+#acct{font-size:14px;font-weight:800;white-space:nowrap}#acct a{color:#5b0eeb;background:#ffe600;padding:8px 14px;border-radius:30px;text-decoration:none;box-shadow:0 4px 14px #0004}
+.hero{text-align:center;padding:26px 8px 18px}
+.hero h2{font-size:30px;line-height:1.2;margin:0 0 10px;font-weight:900;text-shadow:0 3px 18px #0005}
+.hero p{margin:0 auto;font-size:18px;max-width:520px;opacity:.95}
+.badges{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;margin-top:16px}
+.badges span{background:#ffffff26;backdrop-filter:blur(6px);border:1px solid #ffffff70;padding:6px 14px;border-radius:30px;font-size:14px;font-weight:800}
+.tg{display:inline-block;margin-top:16px;background:#fff;color:#229ed9;padding:12px 22px;border-radius:30px;font-weight:900;text-decoration:none;font-size:16px;box-shadow:0 6px 20px #0003}
+.feats{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:8px 0 22px}
+.feat{border-radius:20px;padding:18px 12px;text-align:center;color:#fff;text-decoration:none;box-shadow:0 8px 22px #0003;transition:transform .2s}
+.feat:active,.feat:hover{transform:translateY(-3px) scale(1.02)}
+.feat .ic{font-size:36px;line-height:1}.feat b{display:block;font-size:18px;margin-top:8px}.feat small{font-size:14px;opacity:.9}
+.f1{background:linear-gradient(135deg,#00c6ff,#0072ff)}.f2{background:linear-gradient(135deg,#ff2e88,#ff7a59)}
+.f3{background:linear-gradient(135deg,#00d27a,#00a3a3)}.f4{background:linear-gradient(135deg,#ffb800,#ff6a00)}
+.card{background:#fff;color:#1d1240;border-radius:24px;padding:20px 16px;box-shadow:0 14px 36px #0004;margin-bottom:22px}
+.card h2{font-size:23px;margin:0 0 6px;display:flex;align-items:center;font-weight:900}
+.sub{color:#5a4f7a;font-size:16px;margin:0 0 14px}
+form{display:flex;gap:8px}input{flex:1;min-width:0;padding:15px;border-radius:16px;border:3px solid #e2d7ff;background:#faf8ff;color:#1d1240;font-size:17px;outline:none}
 input:focus{border-color:#7b2ff7;box-shadow:0 0 0 4px #7b2ff733}
-button{padding:0 24px;border:0;border-radius:14px;background:linear-gradient(90deg,#ff3d7f,#ff8a00);color:#fff;font-weight:900;font-size:18px;box-shadow:0 6px 16px #ff3d7f55;cursor:pointer;transition:transform .15s}
-button:hover{transform:scale(1.04)}button:disabled{opacity:.5}
-.chips{margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:8px}
-.chip{font-size:15px;padding:8px 14px;border-radius:30px;color:#1d1240;cursor:pointer;background:#fff;border:2px solid #ddd;font-weight:600}
-.chip:nth-child(4n+1){background:#e0f6ff;border-color:#00a8e8}.chip:nth-child(4n+2){background:#e3ffef;border-color:#19c37d}
-.chip:nth-child(4n+3){background:#fff6d6;border-color:#ffb800}.chip:nth-child(4n+4){background:#ffe3ee;border-color:#ff3d7f}
-#err{color:#d6004c;font-size:16px;margin-top:8px;font-weight:700}
-#run{display:none;margin-top:18px}.bar{display:flex;align-items:center;gap:10px;font-size:18px}
-.dot{width:12px;height:12px;border-radius:50%;background:#ff3d7f;animation:b 1s infinite}.done .dot{background:#19c37d;animation:none}
+button{padding:0 20px;border:0;border-radius:16px;background:linear-gradient(90deg,#ff2e88,#ff6a00);color:#fff;font-weight:900;font-size:17px;box-shadow:0 6px 16px #ff2e8855;cursor:pointer}
+button:disabled{opacity:.5}
+.chips{margin:12px -16px 2px;padding:0 16px 6px;display:flex;gap:8px;overflow-x:auto;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}
+.chip{flex:0 0 auto;font-size:14px;padding:9px 14px;border-radius:30px;cursor:pointer;font-weight:700;color:#fff;white-space:nowrap}
+.chip:nth-child(4n+1){background:#0072ff}.chip:nth-child(4n+2){background:#00a86b}.chip:nth-child(4n+3){background:#ff8a00}.chip:nth-child(4n+4){background:#e0217a}
+#err{color:#d6004c;font-size:15px;margin-top:8px;font-weight:700}
+#run{display:none;margin-top:16px}.bar{display:flex;align-items:center;gap:10px;font-size:16px}
+.dot{width:12px;height:12px;border-radius:50%;background:#ff2e88;animation:b 1s infinite;flex:0 0 auto}.done .dot{background:#00c46a;animation:none}
 @keyframes b{50%{opacity:.3}}
-.grid{display:grid;grid-template-columns:1.6fr 1fr;gap:14px;margin-top:12px}@media(max-width:760px){.grid{grid-template-columns:1fr}}
-.screen{border:3px solid #7b2ff7;border-radius:16px;overflow:hidden;background:#fff;color:#222}
-#view{padding:14px;min-height:240px;max-height:380px;overflow:hidden;font-size:15px;line-height:1.5}#vurl{color:#1a7f37;font-size:13px;word-break:break-all}
-#vtitle{font-size:19px;font-weight:800;margin:4px 0 6px;color:#1a0dab}#vtext{white-space:pre-wrap;color:#333}#vlinks{margin-top:8px;color:#1a0dab;font-size:14px}
-.steps{background:#f4efff;border:3px solid #c9b6ff;border-radius:16px;padding:12px 14px;font-size:16px;line-height:1.7}
+.grid{display:grid;grid-template-columns:1fr;gap:12px;margin-top:12px}
+.screen{border:3px solid #7b2ff7;border-radius:18px;overflow:hidden;background:#fff;color:#222}
+#view{padding:14px;min-height:200px;max-height:320px;overflow:hidden;font-size:15px;line-height:1.5}#vurl{color:#1a7f37;font-size:13px;word-break:break-all}
+#vtitle{font-size:18px;font-weight:800;margin:4px 0 6px;color:#1a0dab}#vtext{white-space:pre-wrap;color:#333}#vlinks{margin-top:8px;color:#1a0dab;font-size:14px}
+.steps{background:#f4efff;border-radius:18px;padding:12px 14px;font-size:15px;line-height:1.7}
 .steps ol{margin:0;padding:0;list-style:none}#status{color:#d6004c;margin-top:6px;font-weight:800}
-#ans{display:none;margin-top:16px;background:#eafff4;border:3px solid #19c37d;border-radius:16px;padding:16px;white-space:pre-wrap;line-height:1.6;font-size:17px}
-#login{display:none;background:#fff;border:3px solid #c9b6ff;border-radius:16px;padding:14px;margin-bottom:14px}
-#login input{width:100%;margin-bottom:10px}#login button{padding:13px 20px}#lmsg{font-size:15px;color:#d6004c;margin-top:6px}
-#share{display:none;margin-top:12px;gap:8px;align-items:center;flex-wrap:wrap;font-size:16px;font-weight:700}
-#share a{padding:8px 16px;border-radius:30px;color:#fff;text-decoration:none;font-weight:800}
+#ans{display:none;margin-top:14px;background:#eafff4;border:3px solid #00c46a;border-radius:18px;padding:16px;white-space:pre-wrap;line-height:1.6;font-size:16px}
+#login{display:none;background:#fff;color:#1d1240;border-radius:20px;padding:16px;margin-bottom:16px;box-shadow:0 10px 30px #0004}
+#login input{width:100%;margin-bottom:10px}#login button{padding:13px 20px}#lmsg{font-size:14px;color:#d6004c;margin-top:6px}
+#share{display:none;margin-top:12px;gap:8px;align-items:center;flex-wrap:wrap;font-size:15px;font-weight:800}
+#share a{padding:9px 16px;border-radius:30px;color:#fff;text-decoration:none;font-weight:800}
 #sx{background:#111}#sw{background:#25d366}#sf{background:#1877f2}#cp{background:#7b2ff7}
-#chat{border:3px solid #ff3d7f}#chat .sub{margin:4px 0 10px}
-#msgs{max-height:420px;overflow-y:auto;font-size:17px;line-height:1.55;display:flex;flex-direction:column;background:#faf7ff;border-radius:14px;padding:10px;margin-top:8px}
-.m{margin:6px 0;padding:10px 14px;border-radius:18px;white-space:pre-wrap;max-width:88%}
-.u{background:linear-gradient(90deg,#ff3d7f,#ff8a00);color:#fff;align-self:flex-end;border-bottom-right-radius:4px}
-.a{background:#fff;border:2px solid #e6dcff;align-self:flex-start;border-bottom-left-radius:4px}#cf{margin-top:10px}
-.tg{display:inline-block;margin-top:12px;background:#229ed9;color:#fff;padding:10px 18px;border-radius:30px;font-weight:800;text-decoration:none;font-size:16px}
-footer{font-size:14px;color:#5a4f7a;margin:24px 0 10px;text-align:center}
-</style></head><body><div class="wrap">
+#chat .sub{margin:4px 0 6px}
+#msgs{max-height:60vh;min-height:160px;overflow-y:auto;font-size:16px;line-height:1.55;display:flex;flex-direction:column;background:linear-gradient(#f7f2ff,#fff2f8);border-radius:18px;padding:12px;margin-top:10px}
+.m{margin:5px 0;padding:10px 14px;border-radius:20px;white-space:pre-wrap;max-width:85%;box-shadow:0 2px 6px #0001}
+.u{background:linear-gradient(90deg,#ff2e88,#ff6a00);color:#fff;align-self:flex-end;border-bottom-right-radius:6px}
+.a{background:#fff;align-self:flex-start;border-bottom-left-radius:6px}#cf{margin-top:10px}
+footer{font-size:12px;opacity:.85;margin:10px 0 0;text-align:center;line-height:1.5}
+@media(min-width:760px){.feats{grid-template-columns:repeat(4,1fr)}.grid{grid-template-columns:1.5fr 1fr}.hero h2{font-size:38px}.wrap{max-width:900px}}
+</style></head><body><div class="blob b1"></div><div class="blob b2"></div><div class="wrap">
 <div class="top"><h1><img class="logo" src="/agent/logo.png" alt=""><span class="grad">Tygar Agent</span></h1><span id="acct"><a href="#" id="si">Sign in</a></span></div>
-<div class="hero"><h2>Your free AI helper for Africa \U0001F30D</h2><p>Ask anything, research the web live, convert bet codes and make pictures. No app needed.</p>
+<div class="hero"><h2>Your free AI buddy for Africa \U0001F30D\u2728</h2><p>Ask anything, research the web live, convert bet codes and make pictures. No app needed.</p>
 <div class="badges"><span>\u26A1 100% free</span><span>\U0001F1F3\U0001F1EC English + Pidgin</span><span>\U0001F512 No passwords</span></div>
 <a class="tg" href="https://t.me/Harkaiafricabot" target="_blank" rel="noopener">\u2708 Also on Telegram</a></div>
-<div class="feats"><a href="#agentcard" class="feat" style="--c:#00a8e8;text-decoration:none;color:inherit"><div class="ic">\U0001F50E</div><b>Live Agent</b><small>Watch it search</small></a>
-<a href="#chat" class="feat" style="--c:#ff3d7f;text-decoration:none;color:inherit"><div class="ic">\U0001F4AC</div><b>Chat</b><small>Ask anything</small></a>
-<a href="#chat" class="feat" style="--c:#19c37d;text-decoration:none;color:inherit"><div class="ic">\U0001F3AB</div><b>Bet codes</b><small>Convert in seconds</small></a>
-<a href="#chat" class="feat" style="--c:#ffb800;text-decoration:none;color:inherit"><div class="ic">\U0001F3A8</div><b>Images</b><small>Type and get art</small></a></div>
+<div class="feats"><a href="#agentcard" class="feat f1"><div class="ic">\U0001F50E</div><b>Live Agent</b><small>Watch it search</small></a>
+<a href="#chat" class="feat f2"><div class="ic">\U0001F4AC</div><b>Chat</b><small>Ask anything</small></a>
+<a href="#chat" class="feat f3"><div class="ic">\U0001F3AB</div><b>Bet codes</b><small>Convert in seconds</small></a>
+<a href="#chat" class="feat f4"><div class="ic">\U0001F3A8</div><b>Images</b><small>Type and get art</small></a></div>
 <div class="card" id="agentcard"><h2>\U0001F50E Live web Agent</h2>
 <p class="sub">Give it a task, watch it read the web live, then get the answer. 3 free tasks a day, 5 when you sign in.</p>
 <div id="login"><input id="em" type="email" placeholder="Your email" autocomplete="email"><button id="sc" type="button">Send code</button>

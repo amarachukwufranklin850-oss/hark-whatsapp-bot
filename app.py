@@ -621,31 +621,86 @@ _img_last = [0.0]
 IMG_GAP = 46   # free tier: 1 image per 45 s per server IP (POLLINATIONS_KEY lifts it)
 
 
-def ai_image(prompt, seed=None, size=768):
-    """Free Pollinations image. Without a key the server gets 1 image / 45 s, so requests queue."""
+IMG_STYLE = ", highly detailed, sharp focus, vibrant colours, cinematic lighting, professional quality"
+
+
+def _cf_image(prompt, seed):
+    """Cloudflare Workers AI (free daily allowance) when CF_ACCOUNT_ID and CF_API_TOKEN are set."""
+    acc, tok = os.environ.get("CF_ACCOUNT_ID", ""), os.environ.get("CF_API_TOKEN", "")
+    if not (acc and tok):
+        return None
+    try:
+        r = requests.post(f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/@cf/black-forest-labs/flux-1-schnell",
+                          headers={"Authorization": f"Bearer {tok}"}, json={"prompt": prompt, "steps": 6, "seed": seed}, timeout=60)
+        if r.status_code == 200:
+            import base64
+            b64 = (r.json().get("result") or {}).get("image")
+            if b64:
+                return base64.b64decode(b64)
+        print("cf image status:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("cf image error:", e)
+    return None
+
+
+def ai_image(prompt, seed=None, size=1024, mark=True):
+    """AI picture: Cloudflare FLUX if configured, else free Pollinations FLUX (1 image / 45 s per server). Adds the Tygar watermark."""
     from urllib.parse import quote
     seed = seed if seed is not None else int(time.time()) % 100000
-    key = os.environ.get("POLLINATIONS_KEY", "")
-    url = (f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={size}&height={size}"
-           f"&seed={seed}&nologo=true&safe=true")
-    hdr = {"Authorization": f"Bearer {key}"} if key else {}
-    with _img_lock:
-        for _ in range(3):
-            if not key:
-                wait = IMG_GAP - (time.time() - _img_last[0])
-                if wait > 0:
-                    time.sleep(wait)
-            try:
-                r = requests.get(url, headers=hdr, timeout=90)
-                _img_last[0] = time.time()
-                if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
-                    return r.content
-                print("image gen status:", r.status_code, r.text[:200])
-                m = re.search(r"Retry after (\d+)s", r.text)
-                time.sleep(int(m.group(1)) + 1 if m else 5)
-            except Exception as e:
-                print("image gen error:", e)
-    return None
+    full = prompt.strip() + IMG_STYLE
+    img = _cf_image(full, seed)
+    if img is None:
+        key = os.environ.get("POLLINATIONS_KEY", "")
+        url = (f"https://image.pollinations.ai/prompt/{quote(full)}?width={size}&height={size}"
+               f"&seed={seed}&model=flux&enhance=true&nologo=true&safe=true")
+        hdr = {"Authorization": f"Bearer {key}"} if key else {}
+        with _img_lock:
+            for _ in range(3):
+                if not key:
+                    wait = IMG_GAP - (time.time() - _img_last[0])
+                    if wait > 0:
+                        time.sleep(wait)
+                try:
+                    r = requests.get(url, headers=hdr, timeout=90)
+                    _img_last[0] = time.time()
+                    if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
+                        img = r.content
+                        break
+                    print("image gen status:", r.status_code, r.text[:200])
+                    m = re.search(r"Retry after (\d+)s", r.text)
+                    time.sleep(int(m.group(1)) + 1 if m else 5)
+                except Exception as e:
+                    print("image gen error:", e)
+    if img and mark:
+        img = watermark(img)
+    return img
+
+
+def _logo_path():
+    p = "/tmp/tygar_logo.png"
+    if not os.path.exists(p):
+        import base64
+        open(p, "wb").write(base64.b64decode(agent.LOGO_B64))
+    return p
+
+
+def watermark(img):
+    """Overlay the Tygar logo (bottom-left, slightly see-through) on a picture."""
+    import subprocess, tempfile, imageio_ffmpeg
+    try:
+        d = tempfile.mkdtemp()
+        src, out = os.path.join(d, "in.img"), os.path.join(d, "out.jpg")
+        open(src, "wb").write(img)
+        fc = ("[1][0]scale2ref=w=oh:h=ih*0.15[l][b];[l]format=rgba,colorkey=black:0.35:0.15,colorchannelmixer=aa=0.55[l2];"
+              "[b][l2]overlay=main_w-overlay_w-main_w*0.03:main_h*0.03")
+        subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", src, "-i", _logo_path(), "-filter_complex", fc,
+                        "-q:v", "3", out], check=True, capture_output=True, timeout=60)
+        data = open(out, "rb").read()
+        subprocess.run(["rm", "-rf", d])
+        return data
+    except Exception as e:
+        print("watermark error:", e)
+        return img
 
 
 def tg_text(chat, t):
@@ -708,10 +763,19 @@ def telegram_image_reply(chat, text):
     if not media_quota(chat, "img"):
         return tg_text(chat, f"You've hit today's limit of {MEDIA_LIMITS['img']} pictures. Try again tomorrow.")
     requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction", json={"chat_id": chat, "action": "upload_photo"}, timeout=5)
+    tg_text(chat, "\U0001F3A8 Drawing it now, give me up to a minute...")
+    art = ai_image(prompt)
+    if art:
+        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto", data={"chat_id": chat, "caption": f"\U0001F3A8 {prompt}"[:1000]},
+                          files={"photo": ("tygar.jpg", art, "image/jpeg")}, timeout=60)
+        if r.status_code < 300:
+            return remember(chat, text, f"[sent an AI picture: {prompt}]")
+        print("sendPhoto error:", r.status_code, r.text[:200])
     pics = web_photos(prompt, 1)
     if not pics:
         return tg_text(chat, f"I couldn't find a photo of \"{prompt}\" online. Try different words.")
     img, title, page = pics[0]
+    img = watermark(img)
     cap = f"\U0001F4F7 {title}" + (f"\nSource: {page}" if page else "")
     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
                       data={"chat_id": chat, "caption": cap[:1000]},
@@ -733,7 +797,8 @@ def make_clip(frames, secs=3):
         p = os.path.join(d, f"f{i}.jpg")
         open(p, "wb").write(f)
         ins += ["-i", p]
-        z = "zoom+0.0012" if i % 2 == 0 else "if(eq(on,0),1.15,zoom-0.0012)"
+        z0 = "zoom+0.0012" if i % 2 == 0 else "if(eq(on,0),1.15,zoom-0.0012)"
+        z = z0
         parts.append(f"[{i}:v]scale=1024:1024:force_original_aspect_ratio=increase,crop=1024:1024,zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
                      f"d={secs*fps}:s=640x640:fps={fps},setsar=1,format=yuv420p[v{i}]")
     chain, last, off = "", "v0", secs - 0.6
@@ -741,6 +806,9 @@ def make_clip(frames, secs=3):
         chain += f";[{last}][v{i}]xfade=transition=fade:duration=0.6:offset={off:.2f}[x{i}]"
         last, off = f"x{i}", off + secs - 0.6
     out = os.path.join(d, "out.mp4")
+    ins += ["-i", _logo_path()]
+    chain += f";[{n}:v]scale=90:90,format=rgba,colorkey=black:0.35:0.15,colorchannelmixer=aa=0.55[lg];[{last}][lg]overlay=main_w-overlay_w-16:16[wm]"
+    last = "wm"
     cmd = [ff, "-y", *ins, "-filter_complex", ";".join(parts) + chain, "-map", f"[{last}]",
            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "26", "-movflags", "+faststart", out]
     subprocess.run(cmd, check=True, capture_output=True, timeout=240)
@@ -759,7 +827,12 @@ def telegram_video_reply(chat, text):
         return tg_text(chat, f"You've hit today's limit of {MEDIA_LIMITS['vid']} videos. Try again tomorrow.")
     tg_text(chat, "\U0001F3AC Making your video, this takes about a minute...")
     requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction", json={"chat_id": chat, "action": "upload_video"}, timeout=5)
-    frames = [p[0] for p in web_photos(prompt, 4)]
+    frames = []
+    if os.environ.get("CF_ACCOUNT_ID") and os.environ.get("CF_API_TOKEN"):
+        shots = ["wide establishing shot", "medium shot", "close-up detail", "dramatic low angle"]
+        frames = [f for f in (ai_image(f"{prompt}, {s}", seed=100 + k, mark=False) for k, s in enumerate(shots)) if f]
+    if len(frames) < 2:
+        frames = [p[0] for p in web_photos(prompt, 4)]
     if len(frames) < 2:
         return tg_text(chat, f"I couldn't find enough photos of \"{prompt}\" online for a video. Try different words.")
     try:
