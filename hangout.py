@@ -54,7 +54,9 @@ def _conn():
         import psycopg2.pool
         with _lock:
             if _pool is None:
-                _pool = psycopg2.pool.ThreadedConnectionPool(1, 6, DB_URL, connect_timeout=8)
+                _pool = psycopg2.pool.ThreadedConnectionPool(1, 8, DB_URL, connect_timeout=8, keepalives=1, keepalives_idle=30,
+                                                          keepalives_interval=10, keepalives_count=3,
+                                                          options="-c statement_timeout=20000 -c idle_in_transaction_session_timeout=30000")
         return _pool.getconn()
     import sqlite3
     return sqlite3.connect(os.environ.get("HANGOUT_DB", "/tmp/hangout.db"), timeout=10)
@@ -84,12 +86,15 @@ def q(sql, args=(), fetch=False, one=False):
             return rows[0] if rows else None
         return rows
     except Exception:
-        c.rollback()
+        try:
+            c.rollback()
+        except Exception:
+            pass
         raise
     finally:
         if PG:
             try:
-                _pool.putconn(c)
+                _pool.putconn(c, close=bool(getattr(c, "closed", 0)))
             except Exception:
                 pass
         else:
