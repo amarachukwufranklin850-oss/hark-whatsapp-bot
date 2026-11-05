@@ -55,16 +55,26 @@ def _conn():
         with _lock:
             if _pool is None:
                 _pool = psycopg2.pool.ThreadedConnectionPool(1, 8, DB_URL, connect_timeout=8, keepalives=1, keepalives_idle=30,
-                                                          keepalives_interval=10, keepalives_count=3,
-                                                          options="-c statement_timeout=20000 -c idle_in_transaction_session_timeout=30000")
+                                                          keepalives_interval=10, keepalives_count=3)
         return _pool.getconn()
     import sqlite3
     return sqlite3.connect(os.environ.get("HANGOUT_DB", "/tmp/hangout.db"), timeout=10)
 
 
 def q(sql, args=(), fetch=False, one=False):
+    """Run SQL; on Postgres retry once on a dropped connection (Neon closes idle ones)."""
+    try:
+        return _q(sql, args, fetch, one)
+    except Exception as e:
+        if PG and type(e).__name__ in ("OperationalError", "InterfaceError"):
+            return _q(sql, args, fetch, one)
+        raise
+
+
+def _q(sql, args=(), fetch=False, one=False):
     """Run SQL written with ? placeholders on Postgres or SQLite."""
     global _ready
+    _bad = [False]
     c = _conn()
     try:
         cur = c.cursor()
@@ -85,7 +95,8 @@ def q(sql, args=(), fetch=False, one=False):
         if one:
             return rows[0] if rows else None
         return rows
-    except Exception:
+    except Exception as e:
+        _bad[0] = type(e).__name__ in ("OperationalError", "InterfaceError")
         try:
             c.rollback()
         except Exception:
@@ -94,7 +105,7 @@ def q(sql, args=(), fetch=False, one=False):
     finally:
         if PG:
             try:
-                _pool.putconn(c, close=bool(getattr(c, "closed", 0)))
+                _pool.putconn(c, close=bool(getattr(c, "closed", 0)) or _bad[0])
             except Exception:
                 pass
         else:
