@@ -239,48 +239,66 @@ def open_url(url):
     return f"Page: {url}\nTitle: {t}\n{text[:6000]}" if text else f"{url} has no readable text (it may need JavaScript or a login)."
 
 
+def tavily_search(query):
+    """Tavily search: Bearer key when TAVILY_API_KEY is set, otherwise keyless mode (no signup)."""
+    h = {"Content-Type": "application/json"}
+    if TAVILY_KEY:
+        h["Authorization"] = f"Bearer {TAVILY_KEY}"
+    else:
+        h["X-Tavily-Access-Mode"] = "keyless"
+    r = requests.post("https://api.tavily.com/search", timeout=20, headers=h,
+                      json={"query": query, "max_results": 5, "include_answer": True,
+                            "search_depth": "basic"})
+    if r.status_code != 200:
+        print("tavily error:", r.status_code, r.text[:200])
+        return []
+    d = r.json()
+    out = []
+    if d.get("answer"):
+        out.append("Answer: " + d["answer"])
+    for x in d.get("results", [])[:5]:
+        out.append(f"- {x.get('title')}: {(x.get('content') or '')[:300]} ({x.get('url')})")
+    return out
+
+
 def web_search(query):
-    """Tavily when a key is set, otherwise DuckDuckGo instant answers plus Wikipedia."""
+    """Tavily first (keyless or free key); falls back to Google News + DuckDuckGo + Wikipedia."""
     out = []
     try:
-        if TAVILY_KEY:
-            r = requests.post("https://api.tavily.com/search", timeout=20,
-                              json={"api_key": TAVILY_KEY, "query": query,
-                                    "max_results": 5, "include_answer": True})
-            d = r.json()
-            if d.get("answer"):
-                out.append("Answer: " + d["answer"])
-            for x in d.get("results", [])[:5]:
-                out.append(f"- {x.get('title')}: {x.get('content','')[:300]} ({x.get('url')})")
-        else:
-            try:
-                rss = requests.get("https://news.google.com/rss/search", timeout=12,
-                                   params={"q": query, "hl": "en-NG", "gl": "NG", "ceid": "NG:en"})
-                root = ET.fromstring(rss.content)
-                items = sorted(root.iter("item"),
-                               key=lambda i: parsedate_to_datetime(i.findtext("pubDate") or "Thu, 01 Jan 1970 00:00:00 GMT"),
-                               reverse=True)[:8]
-                for i in items:
-                    out.append(f"- [{i.findtext('pubDate')}] {i.findtext('title')}")
-            except Exception as e:
-                print("news error:", e)
-            try:
-                d = requests.get("https://api.duckduckgo.com/", timeout=15,
-                                 params={"q": query, "format": "json", "no_html": 1}).json()
-                if d.get("AbstractText"):
-                    out.append(f"{d['AbstractText']} ({d.get('AbstractURL')})")
-            except Exception as e:
-                print("ddg error:", e)
-            try:
-                w = requests.get("https://en.wikipedia.org/w/api.php", timeout=10,
-                             headers={"User-Agent": "HarkFanAfricaBot/1.0"},
-                             params={"action": "query", "list": "search", "srsearch": query,
-                                     "format": "json", "srlimit": 2}).json()
-                for x in w.get("query", {}).get("search", []):
-                    snip = x["snippet"].replace('<span class="searchmatch">', "").replace("</span>", "")
-                    out.append(f"- {x['title']}: {snip}")
-            except Exception as e:
-                print("wiki error:", e)
+        out = tavily_search(query)
+    except Exception as e:
+        print("tavily error:", e)
+    if out:
+        return "\n".join(out)
+    try:
+        try:
+            rss = requests.get("https://news.google.com/rss/search", timeout=12,
+                               params={"q": query, "hl": "en-NG", "gl": "NG", "ceid": "NG:en"})
+            root = ET.fromstring(rss.content)
+            items = sorted(root.iter("item"),
+                           key=lambda i: parsedate_to_datetime(i.findtext("pubDate") or "Thu, 01 Jan 1970 00:00:00 GMT"),
+                           reverse=True)[:8]
+            for i in items:
+                out.append(f"- [{i.findtext('pubDate')}] {i.findtext('title')}")
+        except Exception as e:
+            print("news error:", e)
+        try:
+            d = requests.get("https://api.duckduckgo.com/", timeout=15,
+                             params={"q": query, "format": "json", "no_html": 1}).json()
+            if d.get("AbstractText"):
+                out.append(f"{d['AbstractText']} ({d.get('AbstractURL')})")
+        except Exception as e:
+            print("ddg error:", e)
+        try:
+            w = requests.get("https://en.wikipedia.org/w/api.php", timeout=10,
+                         headers={"User-Agent": "HarkFanAfricaBot/1.0"},
+                         params={"action": "query", "list": "search", "srsearch": query,
+                                 "format": "json", "srlimit": 2}).json()
+            for x in w.get("query", {}).get("search", []):
+                snip = x["snippet"].replace('<span class="searchmatch">', "").replace("</span>", "")
+                out.append(f"- {x['title']}: {snip}")
+        except Exception as e:
+            print("wiki error:", e)
     except Exception as e:
         print("search error:", e)
     return "\n".join(out) or "No results found."
