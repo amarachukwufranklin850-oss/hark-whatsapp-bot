@@ -1716,6 +1716,21 @@ route_add("unwatch", r"^/unwatch\b\s*(.*)$", lambda uk, m, t: wallet_unwatch(uk,
 route_add("wallets", r"^(/wallets|my wallets)\s*$", lambda uk, m, t: wallet_list(uk), 10)
 route_add("alerts", r"^(/alerts|my (price )?alerts)\s*$", lambda uk, m, t: alert_list(uk), 10)
 route_add("alert", r"^/alert\b|\b(alert|tell|notify|ping|message) me (when|if|once)\b.{0,40}\b(hits?|reach(es)?|gets? to|above|below|over|under|goes|drops?|falls?|rises?|crosses|is at)\b", lambda uk, m, t: alert_add(uk, t), 20)
+def fx_convert_cmd(uk, m):
+    amt = parse_amount(m.group(1))
+    a, b = _asset(m.group(2)), _asset(m.group(3))
+    if not amt or not a or not b:
+        return None
+    try:
+        v = amt * price_of(a, b)
+    except Exception:
+        return R("Sorry, I couldn't get the rate right now. Try again in a minute.")
+    note = "\nOfficial mid-market rate (open.er-api.com); street rates differ." if "NGN" in (a[1], b[1]) and a[0] == b[0] == "fiat" else ""
+    return R(f"\U0001F4B1 {fmt_price(amt)} {a[2]} = {fmt_price(v)} {b[2]}{note}")
+
+
+route_add("fxconv", r"^(?:/fx\s+|convert\s+|change\s+|how much is\s+|what is\s+|what's\s+)?([\d.,]+\s*[km]?)\s*([a-z]{2,8})\s+(?:to|in|into)\s+([a-z]{2,8})\s*\??$",
+          lambda uk, m, t: fx_convert_cmd(uk, m), 9)
 route_add("rate", r"^(/rate|/naira)\s*$", lambda uk, m, t: R(rate_text() + "\nStreet (parallel) rates differ; ask \"black market dollar rate today\" for news-based figures."), 10)
 route_add("briefing", r"^/briefing\b\s*(.*)$", lambda uk, m, t: briefing_cmd(uk, m.group(1)), 10)
 route_add("watchpage", r"^(?:/watchpage|watch (?:this )?(?:page|site|website|link) (?:for changes)?:?)\s*(\S*)\s*$", lambda uk, m, t: watchpage_cmd(uk, m.group(1)), 10)
@@ -3324,7 +3339,7 @@ def loan_cmd(uk, text):
     if not quota(uk, "calc"):
         return over("calc")
     body = re.sub(r"^/loan\s*", "", text, flags=re.I)
-    amt = parse_amount(re.sub(r"\d+(\.\d+)?\s*%.*?(?=$|for|over)", "", body))
+    amt = parse_amount(re.sub(r"\d+(\.\d+)?\s*%", " ", body))
     rate, was_monthly = _rate(body)
     months = _months(body)
     if not (amt and rate is not None and months):
@@ -3671,7 +3686,7 @@ route_add("flash", r"^(/flashcards?|(make|create|generate) (me )?(some )?flash ?
 route_add("check", r"^(/check|(please\s+)?(check|correct|proofread|mark|review) (my |this )?(essay|letter|application|grammar|composition|email|write-?up|statement))\b", lambda uk, m, t: check_cmd(uk, t), 12)
 route_add("bizname", r"^(?:/bizname|(?:suggest |give me |i need )?(?:a |some )?(?:business|brand|company|shop) names?(?: ideas?)? for)\s*(.*)$", lambda uk, m, t: bizname_cmd(uk, m.group(1)), 12)
 route_add("caption", r"^(/caption|(write|give|make) (me )?(a |some )?captions?|captions? for)\b", lambda uk, m, t: caption_cmd(uk, t), 12)
-route_add("loan", r"^/loan\b|^(how much (will|would) i pay|calculate) .{0,20}\bloan\b", lambda uk, m, t: loan_cmd(uk, t), 12)
+route_add("loan", r"^/loan\b|^(how much (will|would) i pay|calculate) .{0,20}\bloan\b|^(?=.*\d\s*%)(?=.*\b\d+\s*(months?|years?|yrs?)\b)(?=.*\b(loan|interest|monthly|repay|borrow))(?=.*\d{3,}|.*\d+\s*k\b).{0,160}$", lambda uk, m, t: loan_cmd(uk, t), 12)
 route_add("save", r"^/save\b", lambda uk, m, t: save_cmd(uk, t), 12)
 route_add("split", r"^(/split|split (the )?(bill|cost|money)|split \u20a6?\d)", lambda uk, m, t: split_cmd(uk, t), 12)
 route_add("ajo", r"^/(ajo|esusu|adashe)\b", lambda uk, m, t: ajo_cmd(uk, t), 10)
