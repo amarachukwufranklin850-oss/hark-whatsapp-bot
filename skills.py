@@ -1710,7 +1710,7 @@ def delete_user(chat):
 
 
 # ---------- batch 1 routes ----------
-route_add("watch", r"^(?:/watch|(?:please\s+)?(?:watch|track|monitor) (?:my |this )?(?:wallet|address)(?: address)?:?)\s+(\S{20,100})\s*$", lambda uk, m, t: wallet_watch(uk, m.group(1)), 10)
+route_add("watch", r"^(?:/watch|(?:please\s+)?(?:watch|track|monitor)(?: my| this)?(?: wallet| address)?(?: address)?:?)\s+(T[1-9A-HJ-NP-Za-km-z]{33}|0x[0-9a-fA-F]{40}|bc1[0-9a-z]{25,90}|[13][1-9A-HJ-NP-Za-km-z]{25,34})\s*$", lambda uk, m, t: wallet_watch(uk, m.group(1)), 10)
 route_add("watch_help", r"^/watch\s*$", lambda uk, m, t: R("Send /watch <public wallet address>. Works with TRON USDT (T...), Bitcoin and Ethereum. Max 3 wallets."), 10)
 route_add("unwatch", r"^/unwatch\b\s*(.*)$", lambda uk, m, t: wallet_unwatch(uk, m.group(1)), 10)
 route_add("wallets", r"^(/wallets|my wallets)\s*$", lambda uk, m, t: wallet_list(uk), 10)
@@ -2570,7 +2570,7 @@ route_add("chart", r"^(/chart|(make|draw|create|plot|give) (me )?(an? )?(bar |li
 route_add("slides", r"^(/slides|/pptx|(make|create|prepare|generate) (me )?(a |some )?(powerpoint|presentation|slides|slide deck|pptx))\b", lambda uk, m, t: slides_cmd(uk, t), 12)
 route_add("webpage", r"^(/webpage|/site|(make|create|build|design) (me )?(a |an )?(simple |mini |small )?(web ?page|website|landing page))\b", lambda uk, m, t: webpage_cmd(uk, t), 12)
 route_add("youtube", YT_RE.pattern, lambda uk, m, t: youtube_cmd(uk, t, m.group(1)), 14)
-route_add("recipe", r"^(?:/recipe|recipe for|how (?:do i|to|can i) (?:cook|make|prepare))\s+(.+)$", lambda uk, m, t: recipe_cmd(uk, m.group(1)), 20)
+route_add("recipe", r"^(?:/recipe|(?:give me |send me |i need |show me )?(?:an? )?recipe (?:for|of)|how (?:do i|to|can i) (?:cook|make|prepare))\s+(.+)$", lambda uk, m, t: recipe_cmd(uk, m.group(1)), 20)
 route_add("quiz", r"^(?:/quiz|/practice|(?:give me |start )?(?:a )?(?:jamb|waec|neco) (?:quiz|practice|questions))\b\s*(.*)$", lambda uk, m, t: quiz_cmd(uk, (t if not t.startswith("/") else m.group(1))), 12)
 route_add("cv", r"^(?:/cv|/resume|(?:make|create|write|build) (?:me )?(?:a |my )?(?:cv|resume|curriculum vitae))\b:?\s*(.*)$", lambda uk, m, t: cv_cmd(uk, m.group(1)), 12)
 route_add("invoice", r"^(/invoice|/receipt|(make|create|generate|prepare|write) (me )?(an? )?(invoice|receipt))\b", lambda uk, m, t: invoice_cmd(uk, t), 12)
