@@ -18,6 +18,8 @@ import betconv
 app.register_blueprint(betconv.bp)
 import agent
 app.register_blueprint(agent.bp)
+import skills
+app.register_blueprint(skills.bp)
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")        # any secret word you make up
 WA_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")          # Meta access token
@@ -59,7 +61,16 @@ SYSTEM = (
     "results support it, prefer trusted outlets (BBC, Reuters, AP, ESPN, Punch, Channels, "
     "official sites), and name the source and date. If sources disagree or none confirm it, say "
     "you couldn't verify it instead of guessing. Never invent scores, quotes, numbers or links. "
-    "For medical, legal or money emergencies, advise a professional."
+    "For medical, legal or money emergencies, advise a professional. "
+    "SKILLS (Telegram commands; tell people about them when they fit): /watch wallet alerts (TRON USDT, BTC, ETH, "
+    "read-only), price alerts (\"alert me when dollar hits 1600 naira\"), /briefing daily news+rate+weather, "
+    "/watchpage page-change alerts, \"remember ...\" + /memory + /forget, weather, /ics calendar files, unit and time-zone "
+    "conversion, /follow live match alerts, \"spent \u20a63000 on transport\" + /budget, PDF/DOCX reading and translation, "
+    "/xlsx spreadsheets, /chart, /slides, /webpage mini sites, YouTube summaries, /recipe with naira market list, "
+    "/quiz WAEC/NECO/JAMB practice, /cv, /invoice, /qr, /jobs alerts, /scam checker, /solve homework, /study planner, "
+    "/flashcards, /check essays, /bizname, /caption, /loan and /save calculators, /split and /ajo trackers, /health basics, "
+    "repeating reminders (water, pills), /verse of the day, /fuel prices, /lite mode, /me. Full list: /skills. "
+    "Never ask for seed phrases, private keys, passwords, PINs or OTPs."
 )
 
 TG_CREATOR = (" If asked who made or created you, say you were made by Amarachukwu Franklin from "
@@ -345,6 +356,7 @@ def ask_ai(user, text):
         sys_msg = SYSTEM + f" Today is {today}. Your built-in knowledge is old, so ALWAYS call web_search before answering (or open_url for a specific site) anything about recent events, winners, prices, news, or people's current roles."
         if user.startswith("tg:"):
             sys_msg += TG_CREATOR
+        sys_msg += skills.prompt_extra(user, text)
         msgs = [{"role": "system", "content": sys_msg}] + past[-12:]
         found = []
         rounds = 0
@@ -394,6 +406,7 @@ def ask_ai(user, text):
     past.append({"role": "assistant", "content": reply})
     del past[:-20]
     history.save(user)
+    skills.remember_answer(user, reply)      # "email me this" can send the last answer
     return reply
 
 
@@ -459,6 +472,9 @@ def telegram_incoming():
     if _TG_SECRET_ON["v"] and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != _TG_SECRET_EFF:
         return "forbidden", 403
     upd = request.get_json(silent=True) or {}
+    if skills.group_skip(upd):       # groups: only answer when mentioned or replied to
+        return "ok", 200
+    skills.note_referral(upd)        # t.me/<bot>?start=ref_<id> (count only, no rewards)
     threading.Thread(target=track_update, args=(upd,), daemon=True).start()
     if gate_intercept(upd):          # not verified yet: only the verification flow runs
         return "ok", 200
@@ -474,7 +490,9 @@ def telegram_incoming():
     elif (msg.get("document") or {}).get("mime_type", "").startswith("image/"):
         file_id = msg["document"]["file_id"]
     voice = msg.get("voice") or msg.get("audio") or msg.get("video_note")
-    if chat and voice and not file_id:
+    if chat and not file_id and skills.is_doc(msg.get("document")):
+        threading.Thread(target=skills.tg_document, args=(chat, msg["document"], msg.get("caption") or ""), daemon=True).start()
+    elif chat and voice and not file_id:
         threading.Thread(target=telegram_voice_reply, args=(chat, voice), daemon=True).start()
     elif chat and file_id:
         threading.Thread(target=telegram_photo_reply,
@@ -536,7 +554,7 @@ def telegram_photo_reply(chat, file_id, caption):
                                timeout=30).content
             mime = "image/png" if info["file_path"].lower().endswith(".png") else "image/jpeg"
             b64 = base64.b64encode(img).decode()
-            ask = caption or "Look at this image and help with it. If it's a question or homework, solve it step by step. Otherwise say briefly what it shows."
+            ask = skills.photo_ask(chat, caption) or caption or "Look at this image and help with it. If it's a question or homework, solve it step by step. Otherwise say briefly what it shows."
             msgs = [{"role": "system", "content": SYSTEM},
                     {"role": "user", "content": [
                         {"type": "text", "text": ask},
@@ -619,6 +637,7 @@ def telegram_pdf_reply(chat, text):
         if r.status_code >= 300:
             print("sendDocument error:", r.status_code, r.text)
             raise RuntimeError("send failed")
+        skills.remember_file(f"tg:{chat}", fname, data, "application/pdf", title)   # for "email it to ..."
         h = history.setdefault(f"tg:{chat}", [])
         h += [{"role": "user", "content": text}, {"role": "assistant", "content": f"[sent a PDF: {title}]"}]
         del h[:-20]
@@ -927,6 +946,8 @@ def bet_send(chat, text, markup=None):
 
 
 def telegram_reply(chat, text, reply_to_text=""):
+    if re.match(r"^/start\s+\S", text.strip()):        # deep link payload (e.g. ref_123): treat as /start
+        text = "/start"
     low0 = text.strip().lower()
     mode = take_mode(chat) if not text.startswith("/") else (pending_mode.pop(chat, None) and None)
     if mode == "betcode":
@@ -951,6 +972,8 @@ def telegram_reply(chat, text, reply_to_text=""):
         return telegram_open(chat, text)
     if mode == "web":
         return telegram_open(chat, "/open " + text)
+    if skills.handle_tg(chat, text, reply_to_text):      # skills.py: alerts, memory, files, study, money, tools
+        return
     if low0.startswith("/stats"):
         if int(chat) in DEV_IDS:
             return tg_send(chat, stats_text())
@@ -1000,8 +1023,13 @@ def telegram_reply(chat, text, reply_to_text=""):
                           json={"chat_id": chat, "action": "typing"}, timeout=5)
         except Exception:
             pass
+        skills.pre_reply(chat, text)
         reply = ask_ai(f"tg:{chat}", text)
     payload = {"chat_id": chat, "text": reply}
+    if text.strip() not in ("/start", "/browse"):
+        mk = skills.reply_markup(chat, text)
+        if mk:
+            payload["reply_markup"] = mk
     if text.strip() == "/start":
         payload["reply_markup"] = main_menu()
     elif text.strip() == "/browse":
@@ -1013,6 +1041,8 @@ def telegram_reply(chat, text, reply_to_text=""):
                       json=payload, timeout=20)
     if r.status_code >= 300:
         print("Telegram error:", r.status_code, r.text)
+    elif text.strip() == "/start":
+        skills.after_start(chat)
 
 
 BROWSE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://hark-whatsapp-bot.onrender.com") + "/browse"
@@ -1336,6 +1366,7 @@ def gate_callback(cb, chat, uid):
             GATE.pop(uid, None)
             grant_verified(uid, method="captcha")
             tg_send(chat, "\u2705 Verified! You now have full access to Tygar. Tap what you need, or just ask me anything.", main_menu())
+            skills.after_start(chat)          # first-time welcome tour
             return tg_send(chat, "Optional: follow @hackmacos on X for updates and new features.",
                            {"inline_keyboard": [[{"text": "\U0001D54F Follow @hackmacos", "url": GATE_URL}]]})
         tg_send(chat, "\u274C Not quite. Here's a new one.")
@@ -1517,6 +1548,10 @@ PRIVACY_TEXT = (
     "\u2022 Your Telegram user ID and that you passed the captcha\n"
     "\u2022 Your last 20 messages with Tygar, so it remembers the conversation\n"
     "\u2022 Reminders and to-do items you add\n"
+    "\u2022 What you ask Tygar to keep: facts (\"remember...\"), watched wallet addresses (public only), price/page/match "
+    "alerts, briefing, job and verse settings, spending and ajo entries, study plans, your last uploaded document's text, "
+    "mini web pages you create, \U0001F44D/\U0001F44E votes and invite counts\n"
+    "\u2022 If you ask Tygar to email a file: the recipient address and time (for the 5-a-day limit), plus a blocklist of addresses that said STOP\n"
     "\u2022 How many bet codes you converted today (for the daily limit)\n"
     "\u2022 Which days you used Tygar and how many messages you sent (usage counts only, not the messages)\n\n"
     "What it doesn't keep: photos, voice notes and files are processed and not saved. No phone numbers, passwords or bank details are ever asked for.\n\n"
@@ -1549,8 +1584,12 @@ def delete_my_data(chat, uid):
                     cur.execute("delete from bot_memory where user_id=%s", (f"tg:{chat}",))
         except Exception as e2:
             print("memory delete error:", e, e2)
+    try:
+        skills.delete_user(chat)
+    except Exception as e:
+        print("skills delete error:", e)
     _verified.discard(uid)
-    tg_send(chat, "\U0001F5D1 Done. Your chat memory, reminders, to-dos and verification have been deleted. Send /start to use Tygar again.")
+    tg_send(chat, "\U0001F5D1 Done. Your chat memory, saved facts, alerts, trackers, reminders, to-dos and verification have been deleted. Send /start to use Tygar again.")
 
 
 def wat_day(offset_days=0):
@@ -1642,6 +1681,10 @@ def stats_text():
         lines += ["", "Daily active, last 7 days:"] + [f"{d[5:]}: {n}" for d, n in days]
     if feats:
         lines += ["", "Top features this week:"] + [f"{f}: {n}" for f, n in feats]
+    try:
+        lines += skills.stats_lines()
+    except Exception as e:
+        print("skills stats error:", e)
     lines += ["", "Counting started 2 Nov 2026, so older days show 0."]
     return "\n".join(lines)
 
@@ -1706,6 +1749,8 @@ def parse_reminder(text):
 
 def fmt_due(epoch, rep):
     import datetime
+    if rep.startswith("int:"):
+        return skills.fmt_rep(rep)
     d = datetime.datetime.utcfromtimestamp(epoch + WAT)
     when = d.strftime("%-I:%M %p")
     if rep == "daily":
@@ -1741,7 +1786,7 @@ def list_reminders(chat):
     rows = tq("select id, body, due, rep from bot_reminders where chat=? order by due", (chat,), fetch=True)
     if not rows:
         return tg_send(chat, "You have no reminders. Try: remind me every day at 7am to read.")
-    lines = [f"{i+1}. {r[1]} ({fmt_due(r[2], r[3])})" for i, r in enumerate(rows)]
+    lines = [f"{i+1}. {skills.strip_tag(r[1])} ({fmt_due(r[2], r[3])})" for i, r in enumerate(rows)]
     kb = [[{"text": f"\U0001F5D1 Delete {i+1}", "callback_data": f"rmdel:{r[0]}"}] for i, r in enumerate(rows[:10])]
     tg_send(chat, "\u23F0 Your reminders:\n" + "\n".join(lines), {"inline_keyboard": kb})
 
@@ -1771,7 +1816,7 @@ def main_menu():
             [{"text": "\U0001F4C4 Make a PDF", "callback_data": "m:pdf"}, {"text": "\u23F0 Reminders", "callback_data": "m:remind"}],
             [{"text": "\U0001F4DD To-do list", "callback_data": "m:todo"}, {"text": "\U0001F4AC Live chat", "web_app": {"url": BROWSE_URL.replace("/browse", "/chat")}}],
             [{"text": "\U0001F5A5 Open a website", "callback_data": "m:web"}, {"text": "\U0001F310 Browse the web", "web_app": {"url": BROWSE_URL}}],
-            [{"text": "\U0001F3AB Bet code converter", "callback_data": "m:betconv"}]]
+            [{"text": "\U0001F3AB Bet code converter", "callback_data": "m:betconv"}, {"text": "\U0001F9F0 More skills", "callback_data": "sk:menu:"}]]
     rows += [[{"text": f"\U0001D54F Follow {h} on X", "url": u}] for h, u in X_HANDLES]
     rows += [[{"text": "\U0001F468\u200D\U0001F4BB Speak with the developer", "url": DEV_WA_URL}]]
     return {"inline_keyboard": rows}
@@ -1801,6 +1846,8 @@ def telegram_callback(cb):
             betconv.start(chat, bet_send)
         elif data.startswith("bc:"):
             betconv.on_callback(chat, data, bet_send, pending_mode)
+        elif data.startswith("sk:"):
+            skills.on_callback(chat, (cb.get("from") or {}).get("id"), data, cb)
         elif data.startswith("m:"):
             k = data[2:]
             if k == "remind" and tq("select count(*) from bot_reminders where chat=?", (chat,), fetch=True)[0][0]:
@@ -1836,7 +1883,11 @@ def reminder_loop():
         try:
             now = time.time()
             for rid, chat, body, due, rep in tq("select id, chat, body, due, rep from bot_reminders where due<=?", (now,), fetch=True) or []:
-                if rep:
+                rep = rep or ""
+                if rep.startswith("int:"):           # skills.py repeats (water every 2 h...), quiet hours 22:00-07:00
+                    nxt = skills.next_due(due, rep, now)
+                    claimed = tq("update bot_reminders set due=? where id=? and due=? returning id", (nxt, rid, due), fetch=True)
+                elif rep:
                     nxt = due
                     while nxt <= now:
                         nxt += 7 * 86400 if rep == "weekly" else 86400
@@ -1847,9 +1898,13 @@ def reminder_loop():
                 else:
                     claimed = tq("delete from bot_reminders where id=? and due=? returning id", (rid, due), fetch=True)
                 if claimed and now - due < 6 * 3600:
-                    tg_send(chat, f"\u23F0 Reminder: {body}")
+                    tg_send(chat, f"\u23F0 Reminder: {skills.strip_tag(body)}")
         except Exception as e:
             print("reminder loop error:", e)
+        try:
+            skills.tick()        # wallet/price/page/match alerts, briefings, jobs, verses, self-check
+        except Exception as e:
+            print("skills tick error:", e)
         time.sleep(30)
 
 
@@ -2134,6 +2189,9 @@ def web_chat(uid, text):
     """Tygar on the website: the Telegram features, typed instead of tapped. Returns {"reply", "image"?}."""
     t = text.strip()
     low = t.lower()
+    sk = skills.web(uid, t)          # skills.py (memory, weather, conversions, files, calculators...)
+    if sk is not None:
+        return sk
     if low in ("/start", "/menu", "/help", "help", "menu", "what can you do", "what can you do?"):
         names = ", ".join(betconv.label(k) for k in betconv.working())
         return {"reply": "Here's what I can do, just type it:\n"
@@ -2148,6 +2206,9 @@ def web_chat(uid, text):
                          "\u2022 To-do list and notes saved on your phone\n"
                          "\u2022 Summarise any link: paste a URL\n"
                          "\u2022 Latest news, prices, scores: just ask\n"
+                         "\u2022 More skills: weather, \"remember ...\", unit/time conversion, calendar files, budget (\"spent 3000 on food\"), "
+                         "upload PDF/DOCX to ask or translate, spreadsheets, charts, slides, mini web pages, CV, invoices, QR codes, "
+                         "recipes, homework help, study plans, essay checks, business names, captions, loan/savings maths, bill split. Type /skills\n"
                          f"Bet codes work on: {names}.\nReminders live in the Telegram bot @Harkaiafricabot."}
     m = WEB_CONV_RE.search(t)
     if m or low.startswith("convert") or low.startswith("/convert"):
@@ -2197,6 +2258,7 @@ def web_chat(uid, text):
         title = title.strip("# *").strip() or "Tygars Document"
         data = make_pdf(title, body.strip())
         fname = (re.sub(r"[^A-Za-z0-9]+", "_", title)[:40].strip("_") or "tygar") + ".pdf"
+        skills.remember_file(f"web:{uid}", fname, data, "application/pdf", title)
         return {"reply": f"\U0001F4C4 Your PDF is ready: {title}", "pdf": "data:application/pdf;base64," + base64.b64encode(data).decode(), "pdf_name": fname}
     if WEB_IMG_RE.match(t) and len(WEB_IMG_RE.sub("", t).strip()) >= 3:
         prompt = (WEB_IMG_RE.sub("", t) if low.startswith("/image") else t).strip()[:300]
@@ -2205,7 +2267,7 @@ def web_chat(uid, text):
             import base64
             return {"reply": f"\U0001F3A8 Here you go: {prompt}", "image": "data:image/jpeg;base64," + base64.b64encode(img).decode()}
         return {"reply": "Sorry, the free image maker is busy right now. Try again in a minute."}
-    return {"reply": ask_ai(f"web:{uid}", t)}
+    return skills.web_after(uid, t, ask_ai(f"web:{uid}", t))     # adds tip/feedback chips like Telegram
 
 
 def web_transcribe(audio, name):
@@ -2218,7 +2280,7 @@ def web_transcribe(audio, name):
 
 def web_vision(uid, img, mime, ask):
     import base64
-    ask = ask or "Look at this image and help with it. If it's a question or homework, solve it step by step. Otherwise say briefly what it shows."
+    ask = skills.photo_ask(f"web:{uid}", ask) or ask or "Look at this image and help with it. If it's a question or homework, solve it step by step. Otherwise say briefly what it shows."
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": [{"type": "text", "text": ask[:800]},
                                          {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(img).decode()}"}}]}]
@@ -2229,7 +2291,11 @@ def web_vision(uid, img, mime, ask):
 
 threading.Thread(target=keep_awake, daemon=True).start()
 betconv.init(_launch, ensure_browser, _pw_lock)
-agent.init(web_chat=web_chat, transcribe=web_transcribe, vision=web_vision, tts=tts_mp3, web_search=web_search, send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, model=MODEL, lock=_pw_lock, launch=_launch,
+skills.init(token=TG_TOKEN, groq=groq, web_search=web_search, is_verified=is_verified, dev_ids=DEV_IDS, safe_url=safe_url,
+            make_pdf=make_pdf, latin=latin, parse_reminder=parse_reminder, ai_image=ai_image, tq=tq, history=history, ask_ai=ask_ai, vision_model=VISION_MODEL,
+            reminders=lambda: tq, fmt_due=fmt_due, base_url=BROWSE_URL.rsplit("/browse", 1)[0], stats_one=None)
+agent.init(web_chat=web_chat, doc=skills.web_doc, chip=skills.web_callback, push_save=skills.push_save, note_email=skills.note_email,
+           transcribe=web_transcribe, vision=web_vision, tts=tts_mp3, web_search=web_search, send=tg_send, token=TG_TOKEN, requests=requests, groq=groq, groq_key=GROQ_KEY, model=MODEL, lock=_pw_lock, launch=_launch,
            ensure_browser=ensure_browser, safe_url=safe_url, dev_ids=DEV_IDS,
            base_url=BROWSE_URL.rsplit("/browse", 1)[0],
            placeholder=lambda: open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg"), "rb").read())

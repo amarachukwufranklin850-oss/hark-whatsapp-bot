@@ -19,7 +19,7 @@ TIME_LIMIT = 300
 # Flip to True before an upload/deploy to lock the whole web app behind an
 # "Updating..." screen; flip back to False in the same commit that ships the
 # finished change. While True, pages show the lock and all APIs return 503.
-UPDATING = True
+UPDATING = False
 _MAINT_OK = {"/agent/logo.png", "/agent/favicon.png", "/favicon.ico",
              "/agent/manifest.json", "/agent/icon-192.png", "/agent/icon-512.png",
              "/agent/sw.js", "/.well-known/assetlinks.json"}
@@ -897,15 +897,15 @@ def agent_chat_job(jid):
         return {"reply": "That message expired. Please send it again."}
     if "reply" not in j:
         return {"pending": True}
-    return {"reply": j["reply"], "image": j.get("image"), "pdf": j.get("pdf"), "pdf_name": j.get("pdf_name"), "heard": j.get("heard"), "video": j.get("video")}
+    return {"reply": j["reply"], "image": j.get("image"), "pdf": j.get("pdf"), "pdf_name": j.get("pdf_name"), "heard": j.get("heard"), "video": j.get("video"),
+            "file": j.get("file"), "file_name": j.get("file_name"), "chips": j.get("chips")}
 
 
 @bp.post("/agent/chat")
 def agent_chat():
     import hashlib
     d = request.get_json(silent=True) or {}
-    email = _who_email()
-    who = ("cem:" + hashlib.sha256(email.encode()).hexdigest()[:16]) if email else ("c:" + _ip_hash())
+    who = _chat_who()
     key = (who, _day())
     if _uses.get(key, 0) >= CHAT_DAILY:
         return {"error": f"You've used today's {CHAT_DAILY} free chat messages. Come back tomorrow!"}, 429
@@ -937,9 +937,7 @@ def agent_chat():
 
 @bp.post("/agent/chat/audio")
 def agent_chat_audio():
-    import hashlib
-    email = _who_email()
-    who = ("cem:" + hashlib.sha256(email.encode()).hexdigest()[:16]) if email else ("c:" + _ip_hash())
+    who = _chat_who()
     key = (who, _day())
     if _uses.get(key, 0) >= CHAT_DAILY:
         return {"error": f"You've used today's {CHAT_DAILY} free chat messages. Come back tomorrow!"}, 429
@@ -975,7 +973,10 @@ def agent_chat_audio():
 def _chat_who():
     import hashlib
     email = _who_email()
-    return ("cem:" + hashlib.sha256(email.encode()).hexdigest()[:16]) if email else ("c:" + _ip_hash())
+    who = ("cem:" + hashlib.sha256(email.encode()).hexdigest()[:16]) if email else ("c:" + _ip_hash())
+    if email and H.get("note_email"):
+        H["note_email"](who, email)          # skills: lets "email me this" and web alerts reach the signed-in address
+    return who
 
 
 @bp.post("/agent/chat/photo")
@@ -1004,6 +1005,67 @@ def agent_chat_photo():
             CHAT_JOBS[jid]["reply"] = "Sorry, I couldn't read that photo. Please try again."
     threading.Thread(target=work, daemon=True).start()
     return {"job": jid}
+
+
+@bp.post("/agent/chat/doc")
+def agent_chat_doc():
+    """PDF/DOCX upload from the web chat: summary or Q&A (skills.web_doc), counted against the daily chat cap."""
+    who = _chat_who()
+    key = (who, _day())
+    if _uses.get(key, 0) >= CHAT_DAILY:
+        return {"error": f"You've used today's {CHAT_DAILY} free chat messages. Come back tomorrow!"}, 429
+    f = request.files.get("doc")
+    if not f or not H.get("doc"):
+        return {"error": "No file received."}, 400
+    data = f.read(15_000_001)
+    if len(data) > 15_000_000:
+        return {"error": "That file is too big. Please use one under 15 MB."}, 400
+    name = (f.filename or "document.pdf")[:120]
+    ask = (request.form.get("ask") or "")[:800]
+    _uses[key] = _uses.get(key, 0) + 1
+    jid = secrets.token_urlsafe(9)
+    CHAT_JOBS[jid] = {"ts": time.time()}
+
+    def work():
+        try:
+            CHAT_JOBS[jid].update(H["doc"](who, data, name, ask))
+        except Exception as e:
+            print("web doc error:", str(e)[:200])
+            CHAT_JOBS[jid]["reply"] = "Sorry, I couldn't read that file. Please try again."
+    threading.Thread(target=work, daemon=True).start()
+    return {"job": jid}
+
+
+@bp.post("/agent/chat/chip")
+def agent_chat_chip():
+    """A tapped button chip in the web chat (same handlers as the Telegram inline buttons)."""
+    who = _chat_who()
+    key = (who, _day())
+    if _uses.get(key, 0) >= CHAT_DAILY:
+        return {"error": f"You've used today's {CHAT_DAILY} free chat messages. Come back tomorrow!"}, 429
+    data = str((request.get_json(silent=True) or {}).get("data") or "")[:64]
+    if not data.startswith("sk:") or not H.get("chip"):
+        return {"error": "That button has expired."}, 400
+    _uses[key] = _uses.get(key, 0) + 1
+    jid = secrets.token_urlsafe(9)
+    CHAT_JOBS[jid] = {"ts": time.time()}
+
+    def work():
+        try:
+            CHAT_JOBS[jid].update(H["chip"](who, data))
+        except Exception as e:
+            print("web chip error:", str(e)[:200])
+            CHAT_JOBS[jid]["reply"] = "Sorry, I hit a problem. Please try again in a minute."
+    threading.Thread(target=work, daemon=True).start()
+    return {"job": jid}
+
+
+@bp.post("/agent/push/save")
+def push_save_route():
+    """Save this browser's push subscription so skills alerts (wallet, price, match...) can reach a web user."""
+    d = request.get_json(silent=True) or {}
+    ok = bool(H.get("push_save")) and H["push_save"](_chat_who(), d.get("sub"))
+    return {"ok": bool(ok)}
 
 
 _tts_use = {}
@@ -1284,7 +1346,7 @@ footer{font-size:12px;opacity:.85;margin:10px 0 0;text-align:center;line-height:
 <div id="chat" class="card main"><h2><img class="logo sm" src="/agent/logo.png" alt=""> Chat with Tygar <span class="on">\u25CF online</span></h2>
 <div class="chips"><span class="chip cc">What can you do?</span><span class="chip cc">make a PDF on how to start a small business</span><span class="chip cc">convert VESTC6 from SportyBet to MSport GH</span><span class="chip cc">draw a lion in a Super Eagles jersey</span><span class="chip cc">make a video of Lagos at night</span><span class="chip cc">Wetin dey happen for Naija today?</span></div>
 <div id="msgs"><div class="m a">Hi! I'm Tygar \U0001F44B Ask me anything, or type "what can you do?"</div></div>
-<form id="cf"><button type="button" id="mic" class="ib" title="Talk">\U0001F3A4</button><label class="ib" title="Send a photo">\U0001F4F7<input id="pf" type="file" accept="image/*" hidden></label><label class="ib" title="Upload audio">\U0001F3B5<input id="af" type="file" accept="audio/*" hidden></label><input id="ci" placeholder="Ask Tygar anything..." maxlength="1500" autocomplete="off"><button id="cs">\u27A4</button></form><div id="rec"></div></div>
+<form id="cf"><button type="button" id="mic" class="ib" title="Talk">\U0001F3A4</button><label class="ib" title="Send a photo">\U0001F4F7<input id="pf" type="file" accept="image/*" hidden></label><label class="ib" title="Upload audio">\U0001F3B5<input id="af" type="file" accept="audio/*" hidden></label><label class="ib" title="Upload a PDF or Word file">\U0001F4C4<input id="df" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden></label><input id="ci" placeholder="Ask Tygar anything..." maxlength="1500" autocomplete="off"><button id="cs">\u27A4</button></form><div id="rec"></div></div>
 <div class="card" id="shop"><h2>\U0001F4CD Find a shop</h2>
 <p class="sub">Type a shop's name. I'll pin it on the map, show you, and count down the distance live as you walk.</p>
 <form id="sf2"><input id="sq" placeholder="e.g. Shoprite Enugu, Chicken Republic Warri" maxlength="120" autocomplete="off"><button id="sb">Find</button></form>
@@ -1350,15 +1412,23 @@ const a=document.createElement('a');a.href=d.image;a.download='tygar.jpg';a.clas
 if(d.video){const v=document.createElement('video');v.src=d.video;v.controls=true;v.playsInline=true;v.style.cssText='width:100%;border-radius:12px;margin-top:6px';w.appendChild(v);
 const a=document.createElement('a');a.href=d.video;a.download='tygar.mp4';a.className='pdf';a.textContent='\u2B07 Save video';w.appendChild(document.createElement('br'));w.appendChild(a);}
 if(d.pdf){const a=document.createElement('a');a.href=d.pdf;a.download=d.pdf_name||'tygar.pdf';a.className='pdf';a.textContent='\u2B07 Download PDF';w.appendChild(document.createElement('br'));w.appendChild(a);}
-if(d.reply){CH.push({role:'assistant',content:d.reply});if(!d.image&&!d.video&&!d.pdf)tools(w,d.reply);}$('msgs').scrollTop=1e9;}
+if(d.file){const a=document.createElement('a');a.href=d.file;a.download=d.file_name||'tygar-file';a.className='pdf';a.textContent='\u2B07 Download '+(d.file_name||'file');w.appendChild(document.createElement('br'));w.appendChild(a);}
+if(d.chips&&d.chips.length){const cw=document.createElement('div');cw.className='tools';d.chips.forEach(c=>{const b=document.createElement('a');b.href=c.url||'#';b.textContent=c.text;
+if(c.url){b.target='_blank';b.rel='noopener';}else b.onclick=async ev=>{ev.preventDefault();if(c.data=='push:on'){try{const sub=await ensurePush();
+const r=await (await fetch('/agent/push/save',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({sub})})).json();
+b.textContent=r.ok?'\U0001F514 Notifications on':'Could not turn on';}catch(e){b.textContent=(typeof e==='string'?e:'Could not turn on');}return;}
+addm('user',c.text);const w2=addm('assistant','...');try{const r=await fetch('/agent/chat/chip',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({data:c.data})});
+await finish(w2,await r.json());}catch(x){w2.textContent='Could not reach Tygar. Try again.';}};cw.appendChild(b);});w.appendChild(cw);}
+if(d.reply){CH.push({role:'assistant',content:d.reply});if(!d.image&&!d.video&&!d.pdf&&!d.file)tools(w,d.reply);}$('msgs').scrollTop=1e9;}
 $('cf').onsubmit=async e=>{e.preventDefault();const t=$('ci').value.trim();if(!t)return;$('ci').value='';CH.push({role:'user',content:t});addm('user',t);
 const w=addm('assistant','...');$('cs').disabled=true;
 try{const r=await fetch('/agent/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Agent-Auth':AUTH},body:JSON.stringify({messages:CH.slice(-10)})});
 await finish(w,await r.json());}catch(x){w.textContent='Could not reach Tygar. Try again.';}
 $('cs').disabled=false;};
 async function sendFile(url,field,blob,name,label){addm('user',label);const w=addm('assistant','...');
-const fd=new FormData();fd.append(field,blob,name);if(field=='photo'&&$('ci').value.trim()){fd.append('ask',$('ci').value.trim());$('ci').value='';}
+const fd=new FormData();fd.append(field,blob,name);if((field=='photo'||field=='doc')&&$('ci').value.trim()){fd.append('ask',$('ci').value.trim());$('ci').value='';}
 try{const r=await fetch(url,{method:'POST',headers:{'X-Agent-Auth':AUTH},body:fd});await finish(w,await r.json());}catch(x){w.textContent='Could not send that. Try again.';}}
+$('df').onchange=()=>{const f=$('df').files[0];if(f)sendFile('/agent/chat/doc','doc',f,f.name,'\U0001F4C4 '+f.name);$('df').value='';};
 $('af').onchange=()=>{const f=$('af').files[0];if(f)sendFile('/agent/chat/audio','audio',f,f.name,'\U0001F3B5 '+f.name);$('af').value='';};
 $('pf').onchange=()=>{const f=$('pf').files[0];if(!f)return;const u=URL.createObjectURL(f);sendFile('/agent/chat/photo','photo',f,f.name,'\U0001F4F7 Photo').then(()=>{});
 const im=document.createElement('img');im.src=u;im.style.cssText='width:100%;border-radius:12px;margin-top:6px';[...document.querySelectorAll('.m.u')].pop().appendChild(im);$('pf').value='';};

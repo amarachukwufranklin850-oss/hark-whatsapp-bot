@@ -8,3 +8,12 @@ imageio-ffmpeg
 playwright
 pywebpush
 cryptography
+pypdf
+python-docx
+openpyxl
+matplotlib
+python-pptx
+qrcode
+pillow
+youtube-transcript-api
+tzdata
