@@ -19,7 +19,7 @@ TIME_LIMIT = 300
 # Flip to True before an upload/deploy to lock the whole web app behind an
 # "Updating..." screen; flip back to False in the same commit that ships the
 # finished change. While True, pages show the lock and all APIs return 503.
-UPDATING = False
+UPDATING = True
 _MAINT_OK = {"/agent/logo.png", "/agent/favicon.png", "/favicon.ico",
              "/agent/manifest.json", "/agent/icon-192.png", "/agent/icon-512.png",
              "/agent/sw.js", "/.well-known/assetlinks.json"}
