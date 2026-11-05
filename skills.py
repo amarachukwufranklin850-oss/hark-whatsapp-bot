@@ -391,7 +391,7 @@ def _iso_ts(s):
 
 
 def tron_txs(addr):
-    r = requests.get(f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20", timeout=20, headers=BOT_UA,
+    r = requests.get(f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20", timeout=(6, 15), headers=BOT_UA,
                      params={"limit": 20, "contract_address": USDT_TRC20, "only_confirmed": "true"})
     r.raise_for_status()
     out = []
@@ -406,7 +406,7 @@ def tron_txs(addr):
 
 
 def btc_txs(addr):
-    r = requests.get(f"https://blockstream.info/api/address/{addr}/txs", timeout=20, headers=BOT_UA)
+    r = requests.get(f"https://blockstream.info/api/address/{addr}/txs", timeout=(6, 15), headers=BOT_UA)
     r.raise_for_status()
     out = []
     for x in r.json()[:25]:
@@ -423,7 +423,7 @@ def btc_txs(addr):
 
 
 def eth_txs(addr):
-    r = requests.get(f"https://eth.blockscout.com/api/v2/addresses/{addr}/transactions", timeout=20, headers=BOT_UA)
+    r = requests.get(f"https://eth.blockscout.com/api/v2/addresses/{addr}/transactions", timeout=(6, 15), headers=BOT_UA)
     r.raise_for_status()
     out = []
     low = addr.lower()
@@ -472,11 +472,15 @@ def wallet_watch(uk, addr):
         return R(f"You can watch up to {MAX_WALLETS} wallets. Remove one with /unwatch first.")
     if not quota(uk, "wallet"):
         return over("wallet")
+    import concurrent.futures as _cf
+    ex = _cf.ThreadPoolExecutor(max_workers=1)
     try:
-        txs = FETCH[chain](addr)
+        txs = ex.submit(FETCH[chain], addr).result(timeout=15)
     except Exception as e:
-        print("wallet baseline error:", chain, e)
-        return R("I couldn't reach the blockchain explorer just now. Please try again in a minute.")
+        print("wallet baseline error:", chain, repr(e)[:150], flush=True)
+        txs = []          # start from now; the background check picks up new transactions
+    finally:
+        ex.shutdown(wait=False)
     last = max([t["ts"] for t in txs] or [time.time()])
     seen = ",".join(t["id"] for t in txs if t["ts"] == last)[:2000]
     q("insert into sk_wallets (uk, chain, addr, last_ts, seen, checked, added) values (?, ?, ?, ?, ?, ?, ?)",
