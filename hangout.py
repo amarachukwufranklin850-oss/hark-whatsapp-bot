@@ -78,7 +78,21 @@ def _q(sql, args=(), fetch=False, one=False):
     c = _conn()
     try:
         cur = c.cursor()
+        if PG:
+            cur.execute("SET LOCAL statement_timeout = '20s'")
+            cur.execute("SET LOCAL lock_timeout = '10s'")
         if not _ready:
+            if PG:
+                try:      # clear sessions left stuck by dropped connections (they hold table locks)
+                    cur.execute("select pg_terminate_backend(pid) from pg_stat_activity where pid <> pg_backend_pid() "
+                                "and usename = current_user and state like 'idle in transaction%' "
+                                "and now() - state_change > interval '60 seconds'")
+                    c.commit()
+                    cur.execute("SET LOCAL statement_timeout = '20s'")
+                    cur.execute("SET LOCAL lock_timeout = '10s'")
+                except Exception as e:
+                    print("db cleanup:", str(e)[:120])
+                    c.rollback()
             for s in (SCHEMA_PG if PG else SCHEMA_LITE):
                 cur.execute(s)
             c.commit()
@@ -89,6 +103,9 @@ def _q(sql, args=(), fetch=False, one=False):
                 except Exception:
                     c.rollback()
             _ready = True
+        if PG:
+            cur.execute("SET LOCAL statement_timeout = '20s'")
+            cur.execute("SET LOCAL lock_timeout = '10s'")
         cur.execute(sql.replace("?", "%s") if PG else sql, args)
         rows = cur.fetchall() if fetch or one else None
         c.commit()
