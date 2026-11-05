@@ -329,6 +329,13 @@ def groq(messages, tools=True, model=None):
     return r.json()["choices"][0]["message"]
 
 
+FRESH_RE = re.compile(
+    r"\b(latest|newest|recent(ly)?|current(ly)?|today|tonight|yesterday|this (week|month|year|season)|"
+    r"now|right now|who won|who wins|winner|won the|champions?|score|result|fixture|standings|table|"
+    r"news|update|price|rate|exchange|dollar|naira|election|president|ceo|still|20[2-3][0-9]|"
+    r"wetin happen|who win|how much)\b", re.I)
+
+
 def ask_ai(user, text):
     past = history.setdefault(user, [])
     past.append({"role": "user", "content": text})
@@ -345,6 +352,11 @@ def ask_ai(user, text):
         if link:
             found.append(open_url(link.group(1).rstrip(").,!?")))
             m = {"tool_calls": True}   # answer straight from the page
+            rounds = 1
+        elif FRESH_RE.search(text):
+            # recency question: always search, never trust old built-in knowledge
+            found.append(f"Search: {text}\n{web_search(text[:300])}")
+            m = {"tool_calls": True}
             rounds = 1
         else:
             m = groq(msgs)
